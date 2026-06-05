@@ -1,27 +1,40 @@
 # deep-research
 
-Four-model parallel deep research with adversarial cross-validation. A Claude Code skill that orchestrates Claude, ChatGPT, Perplexity, Gemini, and Grok against the same topic with differentiated strategies, compares their outputs adversarially, integrates them by topic section, and runs a final fact-check pass. Produces a fact-checked, fully-cited "Research Bible."
+Five-model parallel deep research with domain scoping, adversarial cross-validation, and mechanical citation verification. A Claude Code skill that orchestrates Claude, ChatGPT, Perplexity, Gemini, and Grok against the same topic with differentiated strategies, compares their outputs adversarially, integrates them by topic section, verifies every citation against OpenAlex/Crossref, and runs an optional iterative deepening pass. Produces a fact-checked, fully-cited "Research Bible" plus BibTeX and a machine-readable claims file.
 
 ## What it does
 
-Most LLM research is one model, one pass, hallucinated citations. This is five models in parallel, then three rounds of cross-validation, integration, and adversarial fact-checking.
+Most LLM research is one model, one pass, hallucinated citations. This is five models in parallel, six rounds, mechanical citation resolution, and budget-aware execution.
 
 ```
+Round 0  Domain scoping — classify topic, propose source priorities
 Round 1  Five models research in parallel — each with a different strategy
          ├─ Claude       → Academic deep dive (journals, NBER, SSRN)
          ├─ ChatGPT      → Practitioner & explainer (industry, methodology)
          ├─ Perplexity   → Real-time web (current news, live citations)
          ├─ Gemini       → Grey literature & primary sources (govt, IGO, treaties)
          └─ Grok         → Contrarian & cross-disciplinary (dissent, outside views)
-
-Round 2  Adversarial comparison agent maps agreement, disagreement, hallucination risk
-
-Round 3  Section-by-section integration (per topic, not per model) — parallel agents
-
-Round 4  Fact-check + cross-section audit + fix pass
-
-Output   Hub-and-spoke Research Bible: index + sections + bibliography + provenance
+Round 2  Adversarial comparison + citation-laundering detection + completeness map
+Round 3  Three section planners + reconciler → parallel integration agents
+Round 4  Mechanical citation verification (Crossref/OpenAlex) + source tier audit
+         + missing-literature check + adversarial fact-check + fix pass
+Round 5  (optional) Iterative deepening on weak sections, cap 2 iterations
+Output   Hub-and-spoke Research Bible + BibTeX + claims.jsonl + provenance
 ```
+
+## What's new vs. a one-shot LLM
+
+- **Domain scoping** — classifies topic before Round 1, injects domain-specific source priorities (PubMed for medicine, NBER for economics, arXiv for tech, etc.)
+- **Date stamping** — every time-sensitive claim carries `[as of: <date>]`
+- **Confidence tagging** — high-stakes claims carry `[confidence: high/medium/low]`
+- **Cross-model support tags** — `[4/5 support]` shows how many models agree on a claim
+- **Citation-laundering detection** — flags when N models cite the same secondary source as if it were N confirmations
+- **Mechanical citation verification** — resolves every `[Author, Year]` against OpenAlex and Crossref (free, no key)
+- **Source tier audit** — scores bibliography quality (peer-reviewed vs blog vs wiki)
+- **Missing-literature check** — compares against OpenAlex top-N to flag canonical works absent from the bibliography
+- **Multi-language search** — `--languages en,fr,de,zh` finds non-English primary sources
+- **Cost gate + resume** — pre-flight estimate, `--max-cost-usd` hard cap, `--resume` recovers from partial failure
+- **BibTeX + JSONL export** — machine-readable downstream consumption
 
 ## Install
 
@@ -30,7 +43,7 @@ Output   Hub-and-spoke Research Bible: index + sections + bibliography + provena
 git clone https://github.com/nraford7/deep-research.git ~/.claude/skills/deep-research
 
 # 2. Install Python deps
-pip install anthropic openai google-genai
+pip install -r ~/.claude/skills/deep-research/requirements.txt
 
 # 3. Set whichever API keys you have
 cp ~/.claude/skills/deep-research/.env.example ~/.env
@@ -47,32 +60,77 @@ In Claude Code:
 /deep-research [your topic and scope]
 ```
 
-Or invoke the dispatcher directly:
+The skill walks the agent through all six rounds. Or invoke the dispatcher and helper scripts directly:
 
 ```bash
-python3 ~/.claude/skills/deep-research/dispatch.py \
-  --topic "Your research topic" \
-  --scope "What to cover, subtopics, depth, time period..." \
-  --output-dir ./research/topic-slug/round1/
-```
+# 1. Domain scoping
+python3 scripts/scope.py \
+  --topic "Central bank digital currencies" \
+  --scope "Design, adoption, monetary-policy implications" \
+  --output research/cbdc/round0/scope.md \
+  --use-llm
 
-Optional model filter:
+# 2. Pre-flight cost estimate
+python3 dispatch.py --topic "..." --scope "..." \
+  --output-dir research/cbdc/round1/ \
+  --scope-file research/cbdc/round0/scope.json \
+  --estimate-only
 
-```bash
---models claude,perplexity,grok
+# 3. Round 1 dispatch with budget cap
+python3 dispatch.py --topic "..." --scope "..." \
+  --output-dir research/cbdc/round1/ \
+  --scope-file research/cbdc/round0/scope.json \
+  --languages en,zh \
+  --max-cost-usd 50 \
+  --resume
+
+# 4. Bibliography dedup (after Round 3 integration)
+python3 scripts/dedup_bib.py research/cbdc/round1/agent-*.md \
+  --output research/cbdc/sections/bibliography.md
+
+# 5. Round 4 mechanical verification
+python3 scripts/verify_citations.py research/cbdc/sections/ \
+  --output research/cbdc/round4/citation-verification.md --check-urls
+python3 scripts/classify_sources.py research/cbdc/sections/bibliography.md \
+  --output research/cbdc/round4/tier-report.md
+python3 scripts/lit_search.py --topic "CBDC monetary policy" --limit 50 \
+  --compare-bib research/cbdc/sections/bibliography.md \
+  --output research/cbdc/round4/missing-lit.md
+
+# 6. Export
+python3 scripts/export.py \
+  --sections research/cbdc/sections/ \
+  --bibliography research/cbdc/sections/bibliography.md \
+  --output-dir research/cbdc/export/
 ```
 
 ## API keys
 
-| Env var | Model | Get a key |
+| Env var | Purpose | Get a key |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | Claude | https://console.anthropic.com |
 | `OPENAI_API_KEY` | ChatGPT | https://platform.openai.com |
 | `PERPLEXITY_API_KEY` | Perplexity Deep Research | https://www.perplexity.ai/settings/api |
 | `GOOGLE_API_KEY` | Gemini | https://aistudio.google.com/apikey |
 | `XAI_API_KEY` | Grok | https://console.x.ai |
+| `SEMANTIC_SCHOLAR_KEY` | Optional — raises rate limit on `lit_search.py` | https://www.semanticscholar.org/product/api |
+| `CONTACT_EMAIL` | Optional — joins OpenAlex/Crossref "polite pool" | — |
 
 The dispatcher reads from `~/.env` and `./.env` automatically. Or export them in your shell.
+
+**Free APIs (no key required):** OpenAlex, Crossref, Semantic Scholar (low rate).
+
+## Helper scripts
+
+| Script | Purpose |
+|---|---|
+| `scripts/scope.py` | Domain classification + source priority recommendations (rule-based + optional Claude) |
+| `scripts/cost.py` | Cost estimator with budget gate |
+| `scripts/verify_citations.py` | Resolve every citation against OpenAlex + Crossref; flag unresolved, weak matches, orphans, dead URLs |
+| `scripts/dedup_bib.py` | DOI-normalized + fuzzy-title bibliography merge with audit log |
+| `scripts/classify_sources.py` | Tier classifier (peer-reviewed / institutional / book / news / blog / wiki) + quality score |
+| `scripts/lit_search.py` | Query OpenAlex + Semantic Scholar; optionally compare against finished bibliography to flag missing canonical works |
+| `scripts/export.py` | Emit BibTeX (`bibliography.bib`) + JSONL (`claims.jsonl`) from final Bible |
 
 ## Output
 
@@ -83,19 +141,26 @@ research/<topic-slug>/
 │   ├── 01-<name>.md           ← Integrated topic sections (each 8k–20k words)
 │   ├── 02-<name>.md
 │   └── bibliography.md        ← Deduplicated master bibliography
-├── factcheck/
-│   ├── factcheck-*.md         ← Per-section adversarial fact-check
-│   ├── cross-section-audit.md
+├── export/
+│   ├── bibliography.bib       ← BibTeX
+│   └── claims.jsonl           ← Inline citations with surrounding sentence
+├── round4/
+│   ├── citation-verification.md  ← Mechanical OpenAlex/Crossref resolution
+│   ├── tier-report.md            ← Source quality breakdown
+│   ├── missing-lit.md            ← Canonical works absent
+│   ├── factcheck-*.md            ← Adversarial fact-check reports
 │   └── fix-log.md
-└── round1/                    ← Raw model outputs preserved for provenance
+└── round0..round5/            ← Provenance preserved
 ```
 
 ## Why five models, not one
 
 - **Hallucination triangulation** — a fake citation rarely appears in three reports
+- **Mechanical backstop** — `verify_citations.py` resolves every cite against OpenAlex/Crossref; what models invent, the resolver catches
 - **Coverage** — each model has different blind spots; cross-section completeness map exposes them
 - **Citation quality** — Perplexity finds live web sources, Gemini surfaces primary documents, Claude follows academic citation chains
-- **Disagreement is signal** — when models split on a figure, that's a flag, not a problem
+- **Disagreement is signal** — when models split on a figure, that becomes a `[disputed: ...]` tag, not a silent average
+- **Citation laundering caught** — Round 2 flags when N models cite the same secondary source as if it were N confirmations
 
 See `SKILL.md` for the full architecture, prompt templates, and failure modes.
 

@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""
+classify_sources.py — tier each bibliography entry.
+
+Tiers, in descending evidentiary weight:
+  - peer_reviewed   : journal article, conference paper, book chapter (DOI, journal name match)
+  - institutional   : government, IGO, central bank, NGO, university working paper
+  - book            : monograph or edited volume
+  - news            : major newspaper, magazine, wire
+  - blog            : personal blog, Substack, Medium, corporate blog
+  - wiki            : Wikipedia or wiki-family
+  - unknown         : doesn't match any of the above heuristics
+
+Emits a per-entry tier annotation + a summary table (tier mix).
+
+Usage:
+  python3 classify_sources.py sections/bibliography.md --output tier-report.md
+"""
+
+import argparse
+import json
+import re
+from collections import Counter
+from pathlib import Path
+
+
+PEER_REVIEWED_HINTS = [
+    r"\bjournal of\b", r"\breview\b", r"\bproceedings of\b", r"\bquarterly\b",
+    r"\bAmerican Economic Review\b", r"\bNature\b", r"\bScience\b", r"\bCell\b",
+    r"\bLancet\b", r"\bNEJM\b", r"\bIEEE\b", r"\bACM\b", r"\bSpringer\b",
+    r"\bElsevier\b", r"\bWiley\b", r"\bMIT Press\b", r"\bCambridge\b",
+    r"\bOxford\b", r"\bRoutledge\b", r"\bAcademy of\b",
+]
+INSTITUTIONAL_HINTS = [
+    r"\bIMF\b", r"\bWorld Bank\b", r"\bUNCTAD\b", r"\bOECD\b", r"\bUNDP\b",
+    r"\bNBER\b", r"\bSSRN\b", r"\bBIS\b", r"\bFederal Reserve\b", r"\bECB\b",
+    r"\bBank of England\b", r"\bIEA\b", r"\bWTO\b", r"\bWHO\b", r"\bUNESCO\b",
+    r"\bCongressional\b", r"\bGAO\b", r"\bCRS\b", r"\bRAND\b",
+    r"\bBrookings\b", r"\bCEPR\b", r"\bChatham House\b", r"\bCFR\b",
+    r"\bgov\.[a-z]+\b", r"\.gov\b", r"\bcentral bank\b", r"\bworking paper\b",
+    r"\btechnical report\b", r"\bwhite paper\b",
+]
+BOOK_HINTS = [
+    r"\bISBN\b", r"\bChapter \d+\b", r"\bPress\b\s*$", r"\bUniversity Press\b",
+]
+NEWS_HINTS = [
+    r"\bNew York Times\b", r"\bWall Street Journal\b", r"\bFinancial Times\b",
+    r"\bThe Economist\b", r"\bReuters\b", r"\bAssociated Press\b", r"\bBloomberg\b",
+    r"\bGuardian\b", r"\bWashington Post\b", r"\bLA Times\b", r"\bBBC\b",
+    r"\bAxios\b", r"\bPolitico\b", r"\bForeign Policy\b", r"\bForeign Affairs\b",
+    r"nytimes\.com", r"wsj\.com", r"ft\.com", r"reuters\.com", r"bloomberg\.com",
+]
+BLOG_HINTS = [
+    r"medium\.com", r"substack\.com", r"\bblog\b", r"wordpress\.com",
+    r"linkedin\.com/pulse", r"\bpersonal blog\b",
+]
+WIKI_HINTS = [
+    r"wikipedia\.org", r"\bWikipedia\b", r"fandom\.com", r"wikimedia\.org",
+]
+
+PATTERNS = [
+    ("peer_reviewed", PEER_REVIEWED_HINTS),
+    ("institutional", INSTITUTIONAL_HINTS),
+    ("book", BOOK_HINTS),
+    ("news", NEWS_HINTS),
+    ("blog", BLOG_HINTS),
+    ("wiki", WIKI_HINTS),
+]
+DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+", re.IGNORECASE)
+
+
+def classify(entry: str) -> str:
+    if DOI_RE.search(entry):
+        for label, hints in PATTERNS:
+            if label in ("wiki", "blog", "news"):
+                continue
+            if any(re.search(h, entry, re.IGNORECASE) for h in hints):
+                return label
+        return "peer_reviewed"
+    for label, hints in PATTERNS:
+        if any(re.search(h, entry, re.IGNORECASE) for h in hints):
+            return label
+    return "unknown"
+
+
+def parse_entries(text: str):
+    entries = []
+    for raw in text.splitlines():
+        raw = raw.strip(" -*\t")
+        if len(raw) < 20 or raw.startswith("#"):
+            continue
+        entries.append(raw)
+    return entries
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("bibliography", help="Bibliography markdown file")
+    ap.add_argument("--output", default="tier-report.md")
+    args = ap.parse_args()
+
+    text = Path(args.bibliography).read_text(encoding="utf-8", errors="replace")
+    entries = parse_entries(text)
+
+    classified = [(e, classify(e)) for e in entries]
+    counts = Counter(tier for _, tier in classified)
+    total = sum(counts.values()) or 1
+
+    lines = [
+        "# Source Tier Report",
+        "",
+        f"Bibliography: `{args.bibliography}`",
+        f"Total entries: **{total}**",
+        "",
+        "## Tier mix",
+        "",
+        "| Tier | Count | % |",
+        "|---|---|---|",
+    ]
+    for tier in ["peer_reviewed", "institutional", "book", "news", "blog", "wiki", "unknown"]:
+        n = counts.get(tier, 0)
+        lines.append(f"| {tier} | {n} | {100*n/total:.1f}% |")
+
+    quality_score = (
+        counts.get("peer_reviewed", 0) * 3
+        + counts.get("institutional", 0) * 3
+        + counts.get("book", 0) * 2
+        + counts.get("news", 0) * 1
+    ) / (total * 3)
+    lines += ["", f"## Quality score: **{quality_score:.2f}** / 1.0",
+              "",
+              "(weighted: peer_reviewed=3, institutional=3, book=2, news=1, blog/wiki/unknown=0)",
+              ""]
+
+    for tier in ["unknown", "wiki", "blog", "news", "book", "institutional", "peer_reviewed"]:
+        members = [e for e, t in classified if t == tier]
+        if not members:
+            continue
+        lines += [f"## {tier} ({len(members)})", ""]
+        for e in members[:200]:
+            lines.append(f"- `{e[:240]}`")
+        lines.append("")
+
+    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.output).write_text("\n".join(lines), encoding="utf-8")
+
+    json_path = Path(args.output).with_suffix(".json")
+    json_path.write_text(json.dumps({
+        "total": total,
+        "tier_mix": dict(counts),
+        "quality_score": round(quality_score, 3),
+        "entries": [{"tier": t, "text": e} for e, t in classified],
+    }, indent=2), encoding="utf-8")
+    print(f"Report: {args.output}")
+    print(f"JSON:   {json_path}")
+    print(f"Quality score: {quality_score:.2f}")
+
+
+if __name__ == "__main__":
+    main()
