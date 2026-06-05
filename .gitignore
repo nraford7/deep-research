@@ -1,0 +1,29 @@
+# Secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+.python-version
+
+# Research outputs (large, generated)
+research/
+round1/
+round2/
+round3/
+round4/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
