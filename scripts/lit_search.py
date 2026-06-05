@@ -28,9 +28,31 @@ from pathlib import Path
 
 try:
     import requests
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
 except ImportError:
     sys.stderr.write("Missing dep: pip install requests\n")
     sys.exit(1)
+
+
+def _make_session():
+    s = requests.Session()
+    s.headers.update({"User-Agent": "deep-research/1.0"})
+    retry = Retry(total=4, backoff_factor=0.8, status_forcelist=[429, 500, 502, 503, 504],
+                  allowed_methods=frozenset(["GET"]), respect_retry_after_header=True)
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=8, pool_maxsize=16)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
+    return s
+
+
+def _normalize_doi(value):
+    if not value:
+        return ""
+    v = str(value).strip().lower().rstrip("/.,)")
+    v = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", v)
+    v = re.sub(r"^doi:\s*", "", v)
+    return v
 
 
 CONTACT = os.environ.get("CONTACT_EMAIL", "anonymous@example.com")
@@ -41,7 +63,7 @@ DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+", re.IGNORECASE)
 
 
 def query_openalex(topic: str, limit: int = 50):
-    s = requests.Session()
+    s = _make_session()
     s.headers.update({"User-Agent": f"deep-research/1.0 (mailto:{CONTACT})"})
     results = []
     per_page = min(50, limit)
@@ -74,18 +96,17 @@ def query_openalex(topic: str, limit: int = 50):
 
 
 def query_semantic_scholar(topic: str, limit: int = 50):
-    headers = {"User-Agent": f"deep-research/1.0"}
+    s = _make_session()
     if SS_KEY:
-        headers["x-api-key"] = SS_KEY
+        s.headers["x-api-key"] = SS_KEY
     try:
-        r = requests.get(
+        r = s.get(
             f"{SEMANTIC_SCHOLAR}/paper/search",
             params={
                 "query": topic,
                 "limit": min(100, limit),
                 "fields": "title,year,citationCount,authors,venue,externalIds",
             },
-            headers=headers,
             timeout=30,
         )
     except requests.RequestException as e:
@@ -114,11 +135,11 @@ def merge_results(*lists):
     merged = []
     for lst in lists:
         for w in lst:
-            doi = (w.get("doi") or "").lower().rstrip("/")
+            doi = _normalize_doi(w.get("doi"))
             title_norm = re.sub(r"[^a-z0-9]+", " ", (w.get("title") or "").lower()).strip()
             if doi and doi in seen_doi:
                 continue
-            if title_norm in seen_title:
+            if title_norm and title_norm in seen_title:
                 continue
             if doi:
                 seen_doi.add(doi)
@@ -129,19 +150,26 @@ def merge_results(*lists):
 
 
 def compare_against_bib(canonical, bib_text):
-    bib_dois = {m.group(0).lower().rstrip(".,)") for m in DOI_RE.finditer(bib_text)}
-    bib_titles_norm = re.sub(r"[^a-z0-9 ]+", " ", bib_text.lower())
-    missing = []
-    present = []
+    bib_dois = {_normalize_doi(m.group(0)) for m in DOI_RE.finditer(bib_text)}
+    # Token-overlap check should compare against the BIB ENTRIES, not the full file —
+    # otherwise canonical-work title tokens that happen to appear in section prose
+    # produce false "present" hits. Concatenate just the bibliography entry lines.
+    BIB_BULLET_RE = re.compile(r"^\s*(?:[-*]\s+|\d+\.\s+)")
+    bib_entries_text = []
+    for line in bib_text.splitlines():
+        if BIB_BULLET_RE.match(line):
+            bib_entries_text.append(line.lower())
+    bib_titles_norm = re.sub(r"[^a-z0-9 ]+", " ", " ".join(bib_entries_text))
+    missing, present = [], []
     for w in canonical:
-        doi = (w.get("doi") or "").lower().rstrip("/")
+        doi = _normalize_doi(w.get("doi"))
         title = (w.get("title") or "").lower()
         title_tokens = [t for t in re.split(r"\W+", title) if len(t) > 4]
         if not title_tokens:
             continue
         hits = sum(1 for t in title_tokens[:8] if t in bib_titles_norm)
         match_ratio = hits / min(8, len(title_tokens))
-        if (doi and doi in bib_dois) or match_ratio >= 0.6:
+        if (doi and doi in bib_dois) or match_ratio >= 0.7:
             present.append(w)
         else:
             missing.append(w)

@@ -37,7 +37,7 @@ INSTITUTIONAL_HINTS = [
     r"\bBank of England\b", r"\bIEA\b", r"\bWTO\b", r"\bWHO\b", r"\bUNESCO\b",
     r"\bCongressional\b", r"\bGAO\b", r"\bCRS\b", r"\bRAND\b",
     r"\bBrookings\b", r"\bCEPR\b", r"\bChatham House\b", r"\bCFR\b",
-    r"\bgov\.[a-z]+\b", r"\.gov\b", r"\bcentral bank\b", r"\bworking paper\b",
+    r"\.gov(?:\.[a-z]{2,3})?\b", r"\bcentral bank\b", r"\bworking paper\b",
     r"\btechnical report\b", r"\bwhite paper\b",
 ]
 BOOK_HINTS = [
@@ -83,13 +83,23 @@ def classify(entry: str) -> str:
     return "unknown"
 
 
+BIB_BULLET_RE = re.compile(r"^\s*(?:[-*]\s+|\d+\.\s+)")
+YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
+
+
 def parse_entries(text: str):
+    """Match dedup_bib.py output: bullet/numbered lines with a year."""
     entries = []
     for raw in text.splitlines():
-        raw = raw.strip(" -*\t")
-        if len(raw) < 20 or raw.startswith("#"):
+        line = raw.rstrip()
+        if not line or line.startswith("#"):
             continue
-        entries.append(raw)
+        if not BIB_BULLET_RE.match(line):
+            continue
+        body = BIB_BULLET_RE.sub("", line, count=1).strip()
+        if len(body) < 30 or not YEAR_RE.search(body):
+            continue
+        entries.append(body)
     return entries
 
 

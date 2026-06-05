@@ -148,30 +148,52 @@ def llm_proposal(topic: str, scope: str):
     try:
         import anthropic
     except ImportError:
+        print("  --use-llm: anthropic SDK not installed, falling back to rules", file=sys.stderr)
         return None
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key:
-        return None
-    client = anthropic.Anthropic(api_key=key)
-    sys_prompt = (
-        "You are a research methodologist. Given a topic and scope, identify the primary "
-        "academic domain(s) and propose specific source priorities. Output JSON only: "
-        '{"primary_domain": str, "secondary_domains": [str], "priority_sources": [str], '
-        '"weight_against": [str], "must_check": str, "search_keywords": [str]}'
-    )
-    user = f"Topic: {topic}\nScope: {scope}\n\nReturn JSON only."
-    msg = client.messages.create(
-        model="claude-opus-4-20250514",
-        max_tokens=2000,
-        system=sys_prompt,
-        messages=[{"role": "user", "content": user}],
-    )
-    text = msg.content[0].text
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if not match:
+        print("  --use-llm: ANTHROPIC_API_KEY not set, falling back to rules", file=sys.stderr)
         return None
     try:
-        return json.loads(match.group(0))
+        client = anthropic.Anthropic(api_key=key)
+        sys_prompt = (
+            "You are a research methodologist. Given a topic and scope, identify the primary "
+            "academic domain(s) and propose specific source priorities. Output JSON only: "
+            '{"primary_domain": str, "secondary_domains": [str], "priority_sources": [str], '
+            '"weight_against": [str], "must_check": str, "search_keywords": [str]}'
+        )
+        user = f"Topic: {topic}\nScope: {scope}\n\nReturn JSON only."
+        msg = client.messages.create(
+            model="claude-opus-4-20250514",
+            max_tokens=2000,
+            system=sys_prompt,
+            messages=[{"role": "user", "content": user}],
+        )
+        text = msg.content[0].text
+    except Exception as e:
+        print(f"  --use-llm: API error ({type(e).__name__}: {e}), falling back to rules", file=sys.stderr)
+        return None
+    # Strip markdown fences if the model added them despite "JSON only"
+    text = re.sub(r"```(?:json)?\s*", "", text)
+    text = re.sub(r"```\s*$", "", text)
+    # Find the first balanced top-level object
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    end = -1
+    for i, ch in enumerate(text[start:], start=start):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    if end < 0:
+        return None
+    try:
+        return json.loads(text[start:end])
     except json.JSONDecodeError:
         return None
 
@@ -185,11 +207,25 @@ def main():
     args = ap.parse_args()
 
     primary, ranked = classify_topic(args.topic, args.scope)
+    rule_priorities = []
+    rule_weight_against = []
+    rule_must_check = []
+    for d in ranked:
+        conf = DOMAIN_RULES[d]
+        rule_priorities.extend(conf["priority_sources"])
+        rule_weight_against.extend(conf["weight_against"])
+        rule_must_check.append(f"({d}) {conf['must_check']}")
     payload = {
         "topic": args.topic,
         "scope": args.scope,
         "primary_domain": primary,
         "ranked_domains": ranked,
+        # Rule-based priorities are included here so that dispatch.py --scope-file
+        # works even without --use-llm. dispatch.py reads these to build the
+        # injected source-priority block in every Round 1 prompt.
+        "priority_sources": rule_priorities,
+        "weight_against": rule_weight_against,
+        "must_check": " | ".join(rule_must_check),
     }
 
     if args.use_llm:

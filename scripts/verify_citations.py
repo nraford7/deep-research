@@ -32,6 +32,8 @@ from urllib.parse import quote
 
 try:
     import requests
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
 except ImportError:
     sys.stderr.write("Missing dep: pip install requests\n")
     sys.exit(1)
@@ -41,15 +43,49 @@ CONTACT = os.environ.get("CONTACT_EMAIL", "anonymous@example.com")
 OPENALEX = "https://api.openalex.org"
 CROSSREF = "https://api.crossref.org"
 
-INLINE_CITE_RE = re.compile(r"\[([A-Z][A-Za-z\-' ]+?(?:\s+(?:et al\.|&\s+[A-Z][A-Za-z\-']+))?),\s*(\d{4}[a-z]?)\]")
+# Citation patterns — broadened to handle:
+#   [Smith, 2020]                 — solo author
+#   [Smith et al., 2020]          — et al
+#   [Smith & Jones, 2020]         — two-author ampersand
+#   [Smith and Jones, 2020]       — two-author and
+#   [van der Berg, 2020]          — lowercase particles
+#   [U.S. Treasury, 2024]         — institutional with dots
+#   (Smith, 2020) and (Smith et al., 2020)  — parenthetical APA
+# Author group: optional honorific/particle prefix, capitalized surname, optional
+# co-author suffix. Body allows letters, dots, spaces, hyphens, apostrophes.
+_AUTHOR_GROUP = r"(?:[A-Za-z][A-Za-z\.\-' ]{0,80}?)"
+INLINE_CITE_RE = re.compile(
+    rf"[\[\(]\s*({_AUTHOR_GROUP}(?:\s+(?:et\s+al\.?|&\s+{_AUTHOR_GROUP}|and\s+{_AUTHOR_GROUP}))?),?\s*(\d{{4}}[a-z]?)\s*[\]\)]"
+)
 URL_RE = re.compile(r"https?://[^\s\)\]\>]+")
 DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+", re.IGNORECASE)
 BIB_HEADER_RE = re.compile(r"^#{1,3}\s*(bibliography|references|sources)\b", re.IGNORECASE | re.MULTILINE)
 
 
+def first_surname(author_field: str) -> str:
+    """Pull the first author's surname from messy citation text."""
+    s = re.sub(r"\bet\s+al\.?", "", author_field, flags=re.IGNORECASE)
+    s = re.sub(r"\s+(?:&|and)\s+.*$", "", s, flags=re.IGNORECASE)
+    s = s.strip(" ,.").rstrip(",")
+    tokens = [t for t in re.split(r"\s+", s) if t]
+    if not tokens:
+        return ""
+    return tokens[-1].lower().strip(".,")
+
+
 def session():
     s = requests.Session()
     s.headers.update({"User-Agent": f"deep-research/1.0 (mailto:{CONTACT})"})
+    retry = Retry(
+        total=4,
+        backoff_factor=0.8,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=frozenset(["GET", "HEAD"]),
+        respect_retry_after_header=True,
+    )
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=16, pool_maxsize=32)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
     return s
 
 
@@ -60,7 +96,20 @@ def find_md_files(path: Path):
 
 
 def extract_inline_cites(text: str):
-    return [{"author": m.group(1).strip(), "year": m.group(2)} for m in INLINE_CITE_RE.finditer(text)]
+    cites = []
+    seen = set()
+    for m in INLINE_CITE_RE.finditer(text):
+        author = m.group(1).strip()
+        year = m.group(2)
+        # Skip noise that looks like a citation but isn't (e.g. "[1, 2020]")
+        if not re.search(r"[A-Za-z]{2}", author):
+            continue
+        key = (author.lower(), year, m.start())
+        if key in seen:
+            continue
+        seen.add(key)
+        cites.append({"author": author, "year": year})
+    return cites
 
 
 def extract_urls(text: str):
@@ -160,9 +209,11 @@ def resolve_entry(s, entry: str):
 def check_url(s, url: str):
     try:
         r = s.head(url, allow_redirects=True, timeout=10)
-        if r.status_code >= 400:
-            r = s.get(url, allow_redirects=True, timeout=10, stream=True)
-        return r.status_code
+        code = r.status_code
+        if code >= 400:
+            with s.get(url, allow_redirects=True, timeout=10, stream=True) as g:
+                code = g.status_code
+        return code
     except requests.RequestException:
         return None
 
@@ -213,17 +264,20 @@ def main():
 
     bib_keys = []
     for entry in bib_unique:
-        author_m = re.match(r"([A-Z][A-Za-z\-']+)", entry)
+        # First author surname: tolerate "Smith, J.", "Smith J", "van der Berg, A.",
+        # "Smith, J., Jones, B., & Brown, C." — take everything before the first comma
+        # that's followed by an initial, OR before the first ( year.
+        head = re.split(r"\s*\(?\d{4}\)?", entry, maxsplit=1)[0]
+        head = re.split(r",\s*(?=[A-Z]\.|[A-Z][a-z]*\s*[A-Z]\.)", head, maxsplit=1)[0]
+        surname = first_surname(head)
         year_m = re.search(r"\b(19|20)\d{2}\b", entry)
-        if author_m and year_m:
-            bib_keys.append((author_m.group(1).lower(), year_m.group(0), entry))
+        if surname and year_m:
+            bib_keys.append((surname, year_m.group(0), entry))
 
     orphans = []
     for c in all_cites:
-        last = c["author"].split()[-1].lower().rstrip(",")
-        if c["author"].lower().endswith("et al."):
-            last = c["author"].split()[0].lower()
-        if not any(k[0] == last and k[1] == c["year"] for k in bib_keys):
+        first_sn = first_surname(c["author"])
+        if first_sn and not any(k[0] == first_sn and k[1] == c["year"] for k in bib_keys):
             orphans.append(c)
 
     dead_urls = []

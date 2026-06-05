@@ -164,6 +164,17 @@ research/<topic-slug>/
 
 See `SKILL.md` for the full architecture, prompt templates, and failure modes.
 
+## Tests
+
+Minimal regression tests for the parser functions (citation regex, bibliography
+parsers, dedup, BibTeX key, DOI normalization, source classification):
+
+```bash
+python3 tests/test_parsers.py
+# or
+python3 -m pytest tests/
+```
+
 ## License
 
 MIT — see `LICENSE`.

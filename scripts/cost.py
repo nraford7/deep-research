@@ -17,11 +17,17 @@ import argparse
 import sys
 
 
-# USD per 1M tokens. Conservative defaults — refresh periodically.
+# USD per 1M tokens. CHECK BEFORE USE — provider pricing drifts.
+PRICING_LAST_VERIFIED = "2026-01"
 PRICING = {
-    "claude":     {"in": 15.00, "out": 75.00, "model": "claude-opus-4"},
-    "chatgpt":    {"in":  2.00, "out":  8.00, "model": "gpt-4.1"},
-    "perplexity": {"in":  5.00, "out":  5.00, "model": "sonar-deep-research", "search_fee": 0.50},
+    "claude":     {"in": 15.00, "out": 75.00,                     "model": "claude-opus-4"},
+    "chatgpt":    {"in":  2.00, "out":  8.00,                     "model": "gpt-4.1"},
+    # Perplexity sonar-deep-research charges separately for input, reasoning,
+    # output, and per-1000-search calls. A typical Round-1 run does many
+    # internal searches; we estimate ~50 searches per report.
+    "perplexity": {"in":  2.00, "out":  8.00, "reasoning": 3.00,
+                   "searches_per_run": 50, "search_per_k": 5.00,
+                   "model": "sonar-deep-research"},
     "gemini":     {"in":  1.25, "out": 10.00, "model": "gemini-2.5-pro"},
     "grok":       {"in":  3.00, "out": 15.00, "model": "grok-3-latest"},
 }
@@ -43,7 +49,13 @@ def estimate_model(model: str, prompt_words: int, output_words: int) -> dict:
     out_tokens = words_to_tokens(output_words)
     in_cost = (in_tokens / 1_000_000) * p["in"]
     out_cost = (out_tokens / 1_000_000) * p["out"]
-    extra = p.get("search_fee", 0.0)
+    extra = 0.0
+    # Perplexity charges reasoning tokens (~equal to output) and per-search fees.
+    if "reasoning" in p:
+        extra += (out_tokens / 1_000_000) * p["reasoning"]
+    if "searches_per_run" in p and "search_per_k" in p:
+        extra += (p["searches_per_run"] / 1000) * p["search_per_k"]
+    extra += p.get("search_fee", 0.0)
     subtotal = (in_cost + out_cost + extra) * SAFETY_MARGIN
     return {
         "model": model,
@@ -52,7 +64,7 @@ def estimate_model(model: str, prompt_words: int, output_words: int) -> dict:
         "out_tokens": out_tokens,
         "in_cost": round(in_cost, 3),
         "out_cost": round(out_cost, 3),
-        "search_fee": extra,
+        "extra": round(extra, 3),
         "total": round(subtotal, 3),
     }
 
@@ -64,26 +76,34 @@ def estimate_run(models, prompt_words: int, output_words: int) -> dict:
 
 
 def format_report(estimate: dict) -> str:
-    lines = ["Cost estimate (Round 1 only — Rounds 2–4 add ~30–80% on top):", ""]
-    lines.append(f"  {'Model':<14}{'Model ID':<26}{'In $':>10}{'Out $':>10}{'Total $':>12}")
-    lines.append("  " + "-" * 72)
+    lines = [
+        f"Cost estimate (Round 1 only — Rounds 2–5 add ~50–100% on top):",
+        f"Pricing table last verified: {PRICING_LAST_VERIFIED}. Check provider pricing pages if older than 6 months.",
+        "",
+    ]
+    lines.append(f"  {'Model':<14}{'Model ID':<26}{'In $':>10}{'Out $':>10}{'Extra $':>10}{'Total $':>12}")
+    lines.append("  " + "-" * 84)
     for r in estimate["per_model"]:
         if "error" in r:
             lines.append(f"  {r['model']:<14}ERROR: {r['error']}")
             continue
         lines.append(
-            f"  {r['model']:<14}{r['model_id']:<26}{r['in_cost']:>10.2f}{r['out_cost']:>10.2f}{r['total']:>12.2f}"
+            f"  {r['model']:<14}{r['model_id']:<26}"
+            f"{r['in_cost']:>10.2f}{r['out_cost']:>10.2f}{r.get('extra', 0):>10.2f}{r['total']:>12.2f}"
         )
-    lines.append("  " + "-" * 72)
-    lines.append(f"  {'Round 1 total':<50}{'':>10}{estimate['total']:>12.2f}")
+    lines.append("  " + "-" * 84)
+    lines.append(f"  {'Round 1 total':<62}{'':>8}{estimate['total']:>12.2f}")
     lines.append("")
-    lines.append(f"  Rounds 2–4 (comparison + integration + fact-check) typically add 30–80% — budget {estimate['total']*1.5:.2f}–{estimate['total']*1.8:.2f} USD total.")
+    lines.append(
+        f"  Rounds 2–5 (comparison + integration + fact-check + optional deepening) "
+        f"typically add 50–100% — budget {estimate['total']*1.5:.2f}–{estimate['total']*2.0:.2f} USD total."
+    )
     return "\n".join(lines)
 
 
 def enforce_budget(estimate: dict, max_cost: float | None, prompt=True) -> bool:
     """Returns True if run should proceed, False otherwise."""
-    full_estimate = estimate["total"] * 1.65
+    full_estimate = estimate["total"] * 1.75
     if max_cost is not None and full_estimate > max_cost:
         print(f"\n  ✗ BUDGET EXCEEDED: estimated full-run cost ${full_estimate:.2f} > --max-cost-usd ${max_cost:.2f}", file=sys.stderr)
         print(f"    To proceed: re-run with --max-cost-usd {full_estimate:.0f} (or higher), or use --models to trim.", file=sys.stderr)
@@ -109,7 +129,7 @@ def main():
     estimate = estimate_run(models, args.prompt_words, args.output_words)
     print(format_report(estimate))
     if args.max_cost_usd is not None:
-        full = estimate["total"] * 1.65
+        full = estimate["total"] * 1.75
         status = "OK" if full <= args.max_cost_usd else "EXCEEDED"
         print(f"\n  Budget check vs --max-cost-usd {args.max_cost_usd:.2f}: {status} (est full ${full:.2f})")
 

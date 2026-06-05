@@ -25,17 +25,31 @@ from pathlib import Path
 DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+", re.IGNORECASE)
 URL_RE = re.compile(r"https?://[^\s\)\]]+")
 YEAR_RE = re.compile(r"\b(19|20)\d{2}[a-z]?\b")
-INLINE_CITE_RE = re.compile(r"\[([A-Z][A-Za-z\-' ]+?(?:\s+(?:et al\.|&\s+[A-Z][A-Za-z\-']+))?),\s*(\d{4}[a-z]?)\]")
+_AUTHOR_GROUP = r"(?:[A-Za-z][A-Za-z\.\-' ]{0,80}?)"
+INLINE_CITE_RE = re.compile(
+    rf"[\[\(]\s*({_AUTHOR_GROUP}(?:\s+(?:et\s+al\.?|&\s+{_AUTHOR_GROUP}|and\s+{_AUTHOR_GROUP}))?),?\s*(\d{{4}}[a-z]?)\s*[\]\)]"
+)
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z])")
+BIB_BULLET_RE = re.compile(r"^\s*(?:[-*]\s+|\d+\.\s+)")
 
 
 def parse_bib_entries(text: str):
+    """Parse bibliography list entries. Skip prose lines (frontmatter,
+    section dividers, dedup notes). A real entry is a bullet/numbered list
+    item containing a 4-digit year."""
     entries = []
     for raw in text.splitlines():
-        raw = raw.strip(" -*\t")
-        if len(raw) < 20 or raw.startswith("#"):
+        line = raw.rstrip()
+        if not line or line.startswith("#"):
             continue
-        entries.append(raw)
+        if not BIB_BULLET_RE.match(line):
+            continue
+        body = BIB_BULLET_RE.sub("", line, count=1).strip()
+        if len(body) < 30:
+            continue
+        if not YEAR_RE.search(body):
+            continue
+        entries.append(body)
     return entries
 
 
@@ -56,11 +70,19 @@ def extract_authors_year_title(entry: str):
     return author_key, year, pre.strip(), title
 
 
-def to_bibtex_entry(entry: str, idx: int) -> str:
+def to_bibtex_entry(entry: str, author_year_counter: dict) -> str:
     author_key, year, authors, title = extract_authors_year_title(entry)
     doi_m = DOI_RE.search(entry)
     url_m = URL_RE.search(entry)
-    key = f"{author_key}{year}{chr(ord('a') + (idx % 26))}"
+    base = f"{author_key}{year}"
+    seen = author_year_counter.get(base, 0)
+    author_year_counter[base] = seen + 1
+    if seen == 0:
+        key = base
+    elif seen < 26:
+        key = f"{base}{chr(ord('a') + seen)}"
+    else:
+        key = f"{base}_{seen}"
     fields = [f"  author    = {{{bibtex_escape(authors)}}}",
               f"  year      = {{{year}}}",
               f"  title     = {{{bibtex_escape(title)}}}"]
@@ -98,7 +120,8 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     bib_entries = parse_bib_entries(Path(args.bibliography).read_text(encoding="utf-8", errors="replace"))
-    bibtex_lines = [to_bibtex_entry(e, i) for i, e in enumerate(bib_entries)]
+    counter = {}
+    bibtex_lines = [to_bibtex_entry(e, counter) for e in bib_entries]
     bib_path = out_dir / "bibliography.bib"
     bib_path.write_text("\n\n".join(bibtex_lines), encoding="utf-8")
     print(f"BibTeX: {bib_path} ({len(bib_entries)} entries)")

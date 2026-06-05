@@ -225,8 +225,25 @@ def call_gemini(prompt, output_path):
             return _call_gemini_legacy(genai_legacy, prompt, output_path)
         except ImportError:
             return fail_with_install_hint("gemini", "google-genai")
+
     client = genai.Client(api_key=os.environ["GOOGLE_API_KEY"])
     start = time.time()
+
+    def _is_overload(exc) -> bool:
+        # Detect Google-side overload/availability errors using structured codes
+        # where available; only fall back to substring on the very last resort.
+        for attr in ("status_code", "code"):
+            code = getattr(exc, attr, None)
+            if isinstance(code, int) and code in (429, 500, 503):
+                return True
+        # google.genai.errors has typed exception classes; match by class name
+        # without importing the module (it varies across SDK versions).
+        cls = type(exc).__name__
+        if cls in ("ServerError", "ResourceExhausted", "UnavailableError"):
+            return True
+        return False
+
+    last_error = None
     for model_id in ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"]:
         try:
             response = client.models.generate_content(
@@ -238,10 +255,12 @@ def call_gemini(prompt, output_path):
             output_path.write_text(text, encoding="utf-8")
             return _result("gemini", text, start, output_path)
         except Exception as e:
-            if "503" in str(e) or "UNAVAILABLE" in str(e) or "overloaded" in str(e).lower():
+            if _is_overload(e):
+                last_error = e
                 continue
             raise
-    return {"model": "gemini", "status": "error", "error": "All Gemini models unavailable (503)"}
+    return {"model": "gemini", "status": "error",
+            "error": f"All Gemini models unavailable: {type(last_error).__name__ if last_error else 'unknown'}: {last_error}"}
 
 
 def _call_gemini_legacy(genai, prompt, output_path):
@@ -308,13 +327,23 @@ def load_scope_brief(scope_file):
         lines = []
         if data.get("primary_domain"):
             lines.append(f"Primary domain: {data['primary_domain']}")
-        if "llm_proposal" in data:
-            prop = data["llm_proposal"]
+        if data.get("ranked_domains"):
+            lines.append(f"Ranked domains: {', '.join(data['ranked_domains'])}")
+        # LLM proposal takes precedence — it's specifically tuned for this topic.
+        prop = data.get("llm_proposal")
+        prio = (prop or {}).get("priority_sources") or data.get("priority_sources") or []
+        against = (prop or {}).get("weight_against") or data.get("weight_against") or []
+        must = (prop or {}).get("must_check") or data.get("must_check") or ""
+        if prio:
             lines.append("Priority sources:")
-            for s in prop.get("priority_sources", []):
+            for s in prio:
                 lines.append(f"- {s}")
-            if prop.get("must_check"):
-                lines.append(f"Must check: {prop['must_check']}")
+        if against:
+            lines.append("Weight against:")
+            for s in against:
+                lines.append(f"- {s}")
+        if must:
+            lines.append(f"Must check: {must}")
         return "\n".join(lines) if lines else None
     return path.read_text(encoding="utf-8")
 
@@ -359,10 +388,26 @@ def main():
 
     resumed_skip = []
     if args.resume:
+        # Authoritative source for "this model already succeeded": the manifest
+        # status. File size is a poor proxy — an API 4xx error trace can land
+        # at 2-5 KB and look like a real response. We accept a prior result
+        # only when manifest says ok AND the file is on disk AND non-trivial.
+        existing_manifest = {}
+        manifest_check = output_dir / "manifest.json"
+        if manifest_check.exists():
+            try:
+                existing_manifest = json.loads(manifest_check.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                existing_manifest = {}
+        prior_ok = {
+            r["model"]
+            for r in (existing_manifest.get("results") or [])
+            if isinstance(r, dict) and r.get("status") == "ok"
+        }
         runnable = []
         for name in available:
             target = output_dir / MODEL_REGISTRY[name]["filename"]
-            if target.exists() and target.stat().st_size > 1000:
+            if name in prior_ok and target.exists() and target.stat().st_size > 4000:
                 resumed_skip.append(name)
             else:
                 runnable.append(name)

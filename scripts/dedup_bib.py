@@ -59,11 +59,19 @@ def normalize_doi(entry: str):
     return m.group(0).lower().rstrip(".,)").strip()
 
 
+def extract_year(entry: str):
+    m = re.search(r"\b(19|20)\d{2}\b", entry)
+    return int(m.group(0)) if m else None
+
+
 def extract_title_key(entry: str):
     cleaned = re.sub(r"\(\d{4}[a-z]?\)", " ", entry)
     cleaned = re.sub(r"https?://\S+", " ", cleaned)
+    cleaned = re.sub(r"\b10\.\d{4,9}/\S+", " ", cleaned)
     cleaned = re.sub(r"\bdoi:\S+", " ", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"^[A-Z][A-Za-z\-',. ]+?(?:\(\d{4}\))?\.?\s*", "", cleaned)
+    # Strip leading author block — greedy up to the first sentence-ending period,
+    # or up to the year-removed scaffolding "  ."
+    cleaned = re.sub(r"^[A-Z][A-Za-z\-',.\s&]+?\.\s+", "", cleaned, count=1)
     tokens = TITLE_NORM_RE.sub(" ", cleaned.lower()).split()
     tokens = [t for t in tokens if t not in STOPWORDS and len(t) > 2]
     return " ".join(tokens[:20])
@@ -84,8 +92,10 @@ def cluster_entries(entries_by_origin, threshold: float):
                 "origin": origin,
                 "doi": normalize_doi(e),
                 "key": extract_title_key(e),
+                "year": extract_year(e),
             })
 
+    # DOI cluster: NEVER merge across different DOIs even if titles match.
     doi_clusters = {}
     no_doi = []
     for it in items:
@@ -94,19 +104,26 @@ def cluster_entries(entries_by_origin, threshold: float):
         else:
             no_doi.append(it)
 
+    # Title cluster: require fuzzy threshold AND year within ±1 AND title key non-trivial.
     title_clusters = []
     for it in no_doi:
+        if len(it["key"]) < 12:
+            title_clusters.append([it])
+            continue
         placed = False
         for cluster in title_clusters:
-            if similarity(it["key"], cluster[0]["key"]) >= threshold:
-                cluster.append(it)
-                placed = True
-                break
+            head = cluster[0]
+            if similarity(it["key"], head["key"]) < threshold:
+                continue
+            if it["year"] is not None and head["year"] is not None and abs(it["year"] - head["year"]) > 1:
+                continue
+            cluster.append(it)
+            placed = True
+            break
         if not placed:
             title_clusters.append([it])
 
-    all_clusters = list(doi_clusters.values()) + title_clusters
-    return all_clusters
+    return list(doi_clusters.values()) + title_clusters
 
 
 def pick_canonical(cluster):
@@ -118,7 +135,9 @@ def main():
     ap.add_argument("inputs", nargs="+", help="Input markdown files")
     ap.add_argument("--output", required=True, help="Output merged bibliography")
     ap.add_argument("--decisions", help="Sidecar dedup-decisions.md (default: alongside output)")
-    ap.add_argument("--threshold", type=float, default=0.85, help="Fuzzy match threshold (0–1)")
+    ap.add_argument("--threshold", type=float, default=0.92,
+                    help="Fuzzy title-match threshold 0–1 (default 0.92; with ±1 year co-condition). "
+                         "Lower = more merging, higher = more conservative.")
     args = ap.parse_args()
 
     entries_by_origin = {}
