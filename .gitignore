@@ -27,3 +27,10 @@ round4/
 .idea/
 .vscode/
 *.swp
+.kata.local.toml
+# roborev snapshots
+/.roborev/
+
+# Deep Research config — holds inline API keys
+deep-research.toml
+**/config.toml

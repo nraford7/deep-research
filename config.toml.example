@@ -1,0 +1,33 @@
+# Deep Research — provider/agent config example. Copy this to ./deep-research.toml or
+# ~/.config/deep-research/config.toml and fill in your keys. The COPY holds secrets and
+# is gitignored; do NOT put real keys in this example file.
+# Augments ~/.env: built-in providers (claude/chatgpt/perplexity/gemini/grok) still work
+# from env keys; entries here add or override providers and remap agent types.
+
+[providers.deepseek]
+api_type     = "openai"
+api_key      = "sk-xxxx"
+base_url     = "https://api.deepseek.com/v1"
+model        = "deepseek-v4-pro"          # deepseek-reasoner/-chat retire 2026-07-24
+max_tokens   = 32768                       # must be <= the model's output cap or the call 400s
+pricing      = { in = 0.55, out = 2.19 }
+
+[providers.glm]
+api_type   = "openai"
+api_key    = "xxxx"
+# api_key_env = "GLM_KEY"                  # alternative to inline api_key: read from this env var
+base_url   = "https://open.bigmodel.cn/api/paas/v4"
+model      = "glm-4.6"                      # verify current id; glm-4-plus may be retired
+max_tokens = 32768
+# capabilities omitted -> NOT eligible for the real-time agent type
+# max_concurrency = 2                       # throttle if the key has a tight rate limit
+
+# Remap a built-in agent type to a custom provider:
+[agents.real-time]
+provider = "deepseek"                       # ERROR unless deepseek has capabilities=["web_search"]
+
+# Define a brand-new agent type:
+[agents.legal-primary]
+provider      = "glm"
+system_prompt = "You are a legal research analyst. Cite controlling authority, not commentary."
+strategy = "Statutes, case law, regulatory dockets, agency guidance. Cite the controlling authority."
