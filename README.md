@@ -1,19 +1,19 @@
 # deep-research
 
-Five-model parallel deep research with domain scoping, adversarial cross-validation, and mechanical citation verification. A Claude Code skill that orchestrates Claude, ChatGPT, Perplexity, Gemini, and Grok against the same topic with differentiated strategies, compares their outputs adversarially, integrates them by topic section, verifies every citation against OpenAlex/Crossref, and runs an optional iterative deepening pass. Produces a fact-checked, fully-cited "Research Bible" plus BibTeX and a machine-readable claims file.
+Five research strategies run in parallel — each by a provider you configure — with domain scoping, adversarial cross-validation, and mechanical citation verification. A Claude Code skill that runs five agent types (academic, practitioner, real-time, grey-literature, contrarian) against the same topic with differentiated strategies, compares their outputs adversarially, integrates them by topic section, verifies every citation against OpenAlex/Crossref, and runs an optional iterative deepening pass. Produces a fact-checked, fully-cited "Research Bible" plus BibTeX and a machine-readable claims file.
 
 ## What it does
 
-Most LLM research is one model, one pass, hallucinated citations. This is five models in parallel, six rounds, mechanical citation resolution, and budget-aware execution.
+Most LLM research is one model, one pass, hallucinated citations. This is five research strategies in parallel — each via a configured provider — six rounds, mechanical citation resolution, and budget-aware execution.
 
 ```
 Round 0  Domain scoping — classify topic, propose source priorities
-Round 1  Five models research in parallel — each with a different strategy
-         ├─ Claude       → Academic deep dive (journals, NBER, SSRN)
-         ├─ ChatGPT      → Practitioner & explainer (industry, methodology)
-         ├─ Perplexity   → Real-time web (current news, live citations)
-         ├─ Gemini       → Grey literature & primary sources (govt, IGO, treaties)
-         └─ Grok         → Contrarian & cross-disciplinary (dissent, outside views)
+Round 1  Five agent types research in parallel — each with a different strategy
+         ├─ academic         (default: Claude)      → Academic deep dive (journals, NBER, SSRN)
+         ├─ practitioner     (default: ChatGPT)     → Practitioner & explainer (industry, methodology)
+         ├─ real-time        (default: Perplexity)  → Real-time web (current news, live citations)
+         ├─ grey-literature  (default: Gemini)      → Grey literature & primary sources (govt, IGO, treaties)
+         └─ contrarian       (default: Grok)        → Contrarian & cross-disciplinary (dissent, outside views)
 Round 2  Adversarial comparison + citation-laundering detection + completeness map
 Round 3  Three section planners + reconciler → parallel integration agents
 Round 4  Mechanical citation verification (Crossref/OpenAlex) + source tier audit
@@ -118,6 +118,16 @@ python3 scripts/export.py \
 
 The dispatcher reads from `~/.env` and `./.env` automatically. Or export them in your shell.
 
+Providers can also be defined in TOML for arbitrary OpenAI-compatible endpoints (`api_type = "openai"` with a `base_url`) — DeepSeek direct, OpenRouter, Fireworks, xAI, and similar services all work this way. Copy `config.toml.example` to `./deep-research.toml` or `~/.config/deep-research/config.toml` and fill in inline keys. TOML config augments env keys — built-in providers still activate from env vars. Both TOML paths are gitignored.
+
+`config.py` is the single control point for provider resolution in the shipped scripts (Round 0 + Round 1). The optional `[defaults]` TOML table lets you name a provider for one-off calls: `[defaults].utility` controls which provider `scope.py --use-llm` uses for Round 0 scoping — including a subscription provider at $0 per call — instead of a hardcoded API key.
+
+Providers can also be local CLI tools (`api_type = "cli"`) — for example `claude -p` or `codex exec` — which authenticate via your SSO subscription (Claude Pro/Max, ChatGPT) with no per-token API cost. To enable live web search on a `claude` cli provider, set `extra_args = ["--allowedTools", "WebSearch", "WebFetch"]` (read-only; no Bash/Edit/Write) and add `capabilities = ["web_search"]` — this makes it eligible for the `real-time` agent type at **$0 API cost**. `--dangerously-skip-permissions` also works but additionally enables Bash/Edit/Write; avoid it for unattended subprocesses. See `config.toml.example` for the full syntax and a diverse multi-provider example.
+
+> **OpenRouter vs direct APIs:** OpenRouter's value is reaching model lineages you can't get direct (Kimi, GLM, Microsoft, etc.). For models available direct (DeepSeek, Anthropic), the provider's own API is cheaper. All are `api_type = "openai"` providers with a `base_url`.
+
+> **Model-ID drift warning:** Provider model IDs change over time (e.g. DeepSeek legacy IDs `deepseek-chat`/`deepseek-reasoner` retire 2026-07-24). Always verify current IDs on the provider's site. `max_tokens` must not exceed each model's output cap.
+
 **Free APIs (no key required):** OpenAlex, Crossref, Semantic Scholar (low rate).
 
 ## Helper scripts
@@ -153,14 +163,14 @@ research/<topic-slug>/
 └── round0..round5/            ← Provenance preserved
 ```
 
-## Why five models, not one
+## Why five strategies, not one
 
-- **Hallucination triangulation** — a fake citation rarely appears in three reports
-- **Mechanical backstop** — `verify_citations.py` resolves every cite against OpenAlex/Crossref; what models invent, the resolver catches
-- **Coverage** — each model has different blind spots; cross-section completeness map exposes them
+- **Hallucination triangulation** — a fake citation rarely appears in three reports from different providers
+- **Mechanical backstop** — `verify_citations.py` resolves every cite against OpenAlex/Crossref; what agents invent, the resolver catches
+- **Coverage** — each agent type has a different strategy and each provider has different blind spots; cross-section completeness map exposes them
 - **Citation quality** — Perplexity finds live web sources, Gemini surfaces primary documents, Claude follows academic citation chains
-- **Disagreement is signal** — when models split on a figure, that becomes a `[disputed: ...]` tag, not a silent average
-- **Citation laundering caught** — Round 2 flags when N models cite the same secondary source as if it were N confirmations
+- **Disagreement is signal** — when providers split on a figure, that becomes a `[disputed: ...]` tag, not a silent average
+- **Citation laundering caught** — Round 2 flags when N agents cite the same secondary source as if it were N confirmations
 
 See `SKILL.md` for the full architecture, prompt templates, and failure modes.
 

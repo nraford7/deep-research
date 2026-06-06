@@ -144,34 +144,39 @@ def render_priorities(domain: str):
     return "\n".join(lines)
 
 
-def llm_proposal(topic: str, scope: str):
+def llm_proposal(topic: str, scope: str, toml_paths=None):
+    _root = str(Path(__file__).resolve().parent.parent)
+    if _root not in sys.path:
+        sys.path.insert(0, _root)
     try:
-        import anthropic
+        import config
+        import llm
     except ImportError:
-        print("  --use-llm: anthropic SDK not installed, falling back to rules", file=sys.stderr)
-        return None
-    key = os.environ.get("ANTHROPIC_API_KEY")
-    if not key:
-        print("  --use-llm: ANTHROPIC_API_KEY not set, falling back to rules", file=sys.stderr)
+        print("  --use-llm: config/llm not importable, falling back to rules", file=sys.stderr)
         return None
     try:
-        client = anthropic.Anthropic(api_key=key)
-        sys_prompt = (
-            "You are a research methodologist. Given a topic and scope, identify the primary "
-            "academic domain(s) and propose specific source priorities. Output JSON only: "
-            '{"primary_domain": str, "secondary_domains": [str], "priority_sources": [str], '
-            '"weight_against": [str], "must_check": str, "search_keywords": [str]}'
-        )
-        user = f"Topic: {topic}\nScope: {scope}\n\nReturn JSON only."
-        msg = client.messages.create(
-            model="claude-opus-4-20250514",
-            max_tokens=2000,
-            system=sys_prompt,
-            messages=[{"role": "user", "content": user}],
-        )
-        text = msg.content[0].text
+        paths = config.default_toml_paths() if toml_paths is None else toml_paths
+        env = config.load_env_files()
+        providers, _ = config.load_config(paths, env)
+        defaults = config.load_defaults(paths)
+        provider = config.pick_provider(providers, "utility", defaults)
     except Exception as e:
-        print(f"  --use-llm: API error ({type(e).__name__}: {e}), falling back to rules", file=sys.stderr)
+        print(f"  --use-llm: config error ({type(e).__name__}: {e}), falling back to rules", file=sys.stderr)
+        return None
+    if provider is None:
+        print("  --use-llm: no provider configured, falling back to rules", file=sys.stderr)
+        return None
+    sys_prompt = (
+        "You are a research methodologist. Given a topic and scope, identify the primary "
+        "academic domain(s) and propose specific source priorities. Output JSON only: "
+        '{"primary_domain": str, "secondary_domains": [str], "priority_sources": [str], '
+        '"weight_against": [str], "must_check": str, "search_keywords": [str]}'
+    )
+    user = f"Topic: {topic}\nScope: {scope}\n\nReturn JSON only."
+    try:
+        text = llm.call_model(provider, sys_prompt, user)
+    except Exception as e:
+        print(f"  --use-llm: model error ({type(e).__name__}: {e}), falling back to rules", file=sys.stderr)
         return None
     # Strip markdown fences if the model added them despite "JSON only"
     text = re.sub(r"```(?:json)?\s*", "", text)

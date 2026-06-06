@@ -11,7 +11,7 @@ Five-model parallel deep research (Claude + ChatGPT + Perplexity + Gemini + Grok
 
 **API keys** — set whichever you have. The dispatcher auto-detects available keys and only calls models you've configured:
 ```
-ANTHROPIC_API_KEY    # Claude Opus (claude-opus-4)
+ANTHROPIC_API_KEY    # Claude Opus (claude-opus-4-20250514)
 OPENAI_API_KEY       # OpenAI GPT-4.1
 PERPLEXITY_API_KEY   # Perplexity Deep Research (sonar-deep-research)
 GOOGLE_API_KEY       # Gemini 2.5 Pro
@@ -22,9 +22,102 @@ CONTACT_EMAIL        # Optional — joins OpenAlex/Crossref "polite pool"
 
 No key = that model is skipped with a notice. At least one key required. **More models = better cross-validation.**
 
+Providers can also be defined in TOML (see [Provider/Agent Config](#provideragent-config-toml)) for arbitrary OpenAI-compatible endpoints — without touching your environment.
+
 **Python packages**:
 ```bash
 pip install -r requirements.txt
+```
+
+## Provider/Agent Config (TOML)
+
+The dispatcher uses two independent axes of configuration:
+
+- **Providers** — LLM engines. Each provider has `api_type` (`openai`/`anthropic`/`gemini`), `api_key` (inline key) or `api_key_env` (name of an environment variable holding the key — use this to avoid embedding secrets in TOML), `base_url` (for OpenAI-compatible endpoints), `model`, `max_tokens`, `capabilities` (e.g. `["web_search"]`), `pricing`, `fallback_models`, and `max_concurrency`.
+- **Agent types** — Research strategies. Five are built-in (`academic`, `practitioner`, `real-time`, `grey-literature`, `contrarian`). Each has a `strategy` prompt and an optional `provider` override. Agent types are remappable and extensible.
+
+**Config discovery order** (later overrides earlier):
+1. `~/.config/deep-research/config.toml`
+2. `./deep-research.toml`
+
+TOML config **augments** `~/.env` — built-in providers still activate automatically when their env-var API key is set. TOML entries add new providers or override existing ones; you do not need to re-specify built-ins unless you want to change their model or settings.
+
+**Inline API keys are supported in TOML** — see `config.toml.example` at the repo root. Copy it to `./deep-research.toml` or `~/.config/deep-research/config.toml` and fill in your keys. Both paths are gitignored.
+
+**`[defaults]` table** — names providers for one-off, non-strategy calls. Currently used by Round 0 scoping (`scope.py --use-llm`):
+
+```toml
+[defaults]
+utility = "claude-sub"     # provider for one-off calls (scoping)
+# synthesis = "claude-sub" # reserved for future reasoning/synthesis rounds
+```
+
+Resolution order (`config.pick_provider`): `[defaults].<role>` provider if configured → first available of `claude-sub`, `claude`, `chatgpt` → any configured provider → fall back to rule-based. Prefer a cheap or subscription provider here; a web-search provider (e.g. Perplexity) would spend its per-search budget on a trivial JSON call.
+
+**`config.py` is the single control point** for provider resolution in the shipped pipeline scripts: both Round 1 dispatch (`dispatch.py`, via `load_config` + the agent-type assignment) and Round 0 scoping (`scope.py`, via `pick_provider` on the `[defaults].utility` role) load their providers through it. The `[defaults]` role-resolution above is used for the one-off `scope.py` call, not by `dispatch.py` (which maps agent types to providers). Note: Rounds 2–4 reasoning runs on the Claude Code session's own subagents and is outside these scripts.
+
+> **Model-ID drift warning:** Provider model IDs change. For example, DeepSeek legacy IDs `deepseek-reasoner` and `deepseek-chat` retire 2026-07-24 in favour of `deepseek-v4-*`; GLM model IDs also shift. Always verify the current ID in the provider's docs. `max_tokens` must stay within each model's output cap — exceeding it causes a 400 error.
+
+### CLI / subscription providers (`api_type = "cli"`)
+
+Providers can run a local CLI tool — `claude -p` or `codex exec` — that authenticates via your SSO subscription (Claude Pro/Max, ChatGPT) rather than a paid API key. No per-token cost.
+
+**Config fields:**
+
+| Field | Required | Notes |
+|---|---|---|
+| `api_type` | yes | `"cli"` |
+| `command` | yes | Binary name or path (`"claude"`, `"codex"`). Provider is skipped if the binary is not on PATH. |
+| `model` | no | Passed as `--model` to the CLI. Omit to use the CLI's own default. |
+| `extra_args` | no | List of extra flags passed verbatim to the CLI (e.g. `["--allowedTools", "WebSearch", "WebFetch"]` to enable read-only live web search). |
+| `capabilities` | no | Same as other providers — set `["web_search"]` only if the CLI can deliver live results (see caveat below). |
+| `max_concurrency` | no | Throttle concurrent invocations. |
+
+No `api_key` or `api_key_env` is needed or used.
+
+**Auth — key scrubbing:** `call_cli` removes `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` from the subprocess environment before invoking the binary, so the CLI falls back to subscription auth rather than charging a metered API key.
+
+**How each CLI is invoked:**
+
+- `claude`: `claude -p --system-prompt <system> [--model M] [extra_args...]`, prompt via stdin.
+- `codex`: `codex exec [--model M] [extra_args...]`, system prompt prepended to stdin (codex has no dedicated system-prompt flag).
+- Any other binary: `<command> [extra_args...]`, system prompt prepended to stdin.
+
+**Tool-use caveat (real-time agent type):** `claude -p` blocks tools by default — a live run shows "WebSearch is blocked in the current permission mode". A cli provider mapped to the `real-time` agent type will therefore return knowledge-cutoff results, not live web search, unless you explicitly opt in via `extra_args`.
+
+**Recommended — read-only web search:**
+```toml
+extra_args   = ["--allowedTools", "WebSearch", "WebFetch"]
+capabilities = ["web_search"]
+```
+This enables live web search **without** Bash/Edit/Write access. Combined with `capabilities = ["web_search"]`, the provider becomes eligible for the `real-time` agent type — so you can run the real-time pass using a Claude Pro/Max subscription at **$0 API cost** instead of Perplexity.
+
+**Nuclear option (not recommended for unattended subprocesses):**
+```toml
+extra_args = ["--dangerously-skip-permissions"]
+```
+This also enables live web search, but *additionally* enables Bash, Edit, Write, and other tools in your current working directory. Avoid for an automated subprocess you don't want touching your filesystem.
+
+Perplexity's `sonar-deep-research` model is still stronger for live research; the subscription route is the tradeoff of cost ($0) against depth.
+
+**Cost display:** cli providers show `subscription — no metered API cost` in the pre-flight estimate; their contribution to the Round 1 total is $0.
+
+**Example:**
+
+```toml
+[providers.claude-sub]
+api_type     = "cli"
+command      = "claude"
+# model      = "claude-opus-4-20250514"
+extra_args   = ["--allowedTools", "WebSearch", "WebFetch"]   # read-only web; no Bash/Edit/Write
+capabilities = ["web_search"]                                 # makes it real-time-eligible
+
+[agents.academic]
+provider = "claude-sub"   # route academic agent through subscription, saving API cost
+
+[agents.real-time]
+provider = "claude-sub"   # live web search at $0 — Perplexity sonar-deep-research is
+                          # stronger, but this is a free alternative
 ```
 
 ## When to Use
@@ -66,10 +159,12 @@ python3 scripts/scope.py \
   --topic "Your topic" \
   --scope "Your scope" \
   --output research/[topic-slug]/round0/scope.md \
-  --use-llm   # optional — refines with Claude
+  --use-llm   # optional — refines with the configured utility provider
 ```
 
-The output is injected into every Round 1 model prompt via `--scope-file`, so each model knows which sources to weight. **This is the single largest credibility upgrade in the pipeline** — a generic prompt produces generic sources.
+`--use-llm` resolves the provider via `config.py`: it reads `[defaults].utility` from your TOML, falls back to the first available of `claude-sub`, `claude`, `chatgpt`, then any configured provider, and falls back silently to rule-based scoping if none are available or the call fails. Previously this was hardcoded to the Anthropic API; it now runs through whichever provider you configure — including a `cli`/subscription provider at $0 per call.
+
+The output is injected into every Round 1 agent prompt via `--scope-file`, so each agent knows which sources to weight. **This is the single largest credibility upgrade in the pipeline** — a generic prompt produces generic sources.
 
 ## Round 1: Multi-Model Parallel Research
 
@@ -81,7 +176,7 @@ python3 dispatch.py --topic "..." --scope "..." --output-dir ./round1/ \
     --estimate-only
 ```
 
-The dispatcher prints a cost estimate per model. Round 1 alone runs $5–40 depending on which models are enabled; full pipeline (rounds 2–5) typically adds 50–80% on top.
+The dispatcher prints a cost estimate per agent. Round 1 alone runs $5–40 depending on which agent types are enabled; full pipeline (rounds 2–5) typically adds 50–80% on top.
 
 ### Step 1.2: Dispatch with budget gate and language list
 
@@ -98,27 +193,31 @@ python3 dispatch.py \
 
 | Flag | Purpose |
 |---|---|
-| `--scope-file` | Injects Round 0 domain priorities into each model's prompt |
-| `--languages` | Tells models to also search non-English primary sources |
+| `--scope-file` | Injects Round 0 domain priorities into each agent's prompt |
+| `--languages` | Tells agents to also search non-English primary sources |
 | `--max-cost-usd` | Hard cap; aborts if estimated cost exceeds it |
-| `--resume` | Skip models whose output already exists (recovers from partial failure) |
+| `--resume` | Skip agent types whose output file already exists (recovers from partial failure) |
 | `--no-confirm` | Skip the interactive cost prompt |
 | `--estimate-only` | Print estimate and exit |
-| `--models` | Force subset, e.g. `--models claude,perplexity` |
+| `--agents` | Run a subset of agent types, e.g. `--agents academic,real-time,contrarian` (default: all) |
 
-### Step 1.3: Per-model strategies
+### Step 1.3: Agent types and default provider pairings
 
-| Model | Strategy | Why this model |
-|---|---|---|
-| **Claude Opus** | Academic deep dive — journals, NBER, SSRN, citation chains | Best at long-form analytical synthesis |
-| **ChatGPT (GPT-4.1)** | Practitioner & explainer — white papers, industry reports | Strong structured analysis |
-| **Perplexity Deep Research** | Real-time web — current news, recent data, live citations | Built-in deep web search |
-| **Gemini 2.5 Pro** | Grey literature & primary sources — governmental, IGO, treaty | Largest context, strong document analysis |
-| **Grok 3** | Contrarian & cross-disciplinary — dissent, alternative framings | Challenges consensus |
+| Agent type | Default provider | Strategy | Why this pairing |
+|---|---|---|---|
+| **academic** | Claude (claude-opus-4-20250514) | Academic deep dive — journals, NBER, SSRN, citation chains | Best at long-form analytical synthesis |
+| **practitioner** | ChatGPT (gpt-4.1) | Practitioner & explainer — white papers, industry reports | Strong structured analysis |
+| **real-time** | Perplexity (sonar-deep-research) | Real-time web — current news, recent data, live citations | Built-in deep web search; requires `web_search` capability |
+| **grey-literature** | Gemini (gemini-2.5-pro) | Grey literature & primary sources — governmental, IGO, treaty | Largest context, strong document analysis |
+| **contrarian** | Grok (grok-3-latest) | Contrarian & cross-disciplinary — dissent, alternative framings | Challenges consensus |
+
+The default provider is used when the built-in env-var key is present. Override any pairing via `[agents.<name>] provider = "..."` in TOML. Add entirely new agent types the same way.
+
+> **Real-time guard:** The `real-time` agent type requires a provider with `capabilities = ["web_search"]` (e.g. perplexity). If no such provider is configured, a console warning is printed and the report file is prefixed with `> [no live web search — knowledge-cutoff results]` so a stale answer is never silently filed under a real-time heading.
 
 ### Round 1 prompt rules — encoded in `dispatch.py`
 
-Every Round 1 model prompt enforces:
+Every Round 1 agent prompt enforces:
 
 - **No fabrication.** "Mark UNVERIFIED rather than guess."
 - **Date stamping.** Any year/statistic/"current" claim must carry `[as of: <date>]`.
@@ -146,14 +245,14 @@ Dispatch a Claude Code background agent that:
 │   ├── scope.md                       ← Domain classification + priorities
 │   └── scope.json                     ← Machine-readable (used by dispatch.py)
 ├── round1/
-│   ├── agent-1-claude.md
-│   ├── agent-2-chatgpt.md
-│   ├── agent-3-perplexity.md
-│   ├── agent-4-gemini.md
-│   ├── agent-5-grok.md
+│   ├── agent-academic.md
+│   ├── agent-practitioner.md
+│   ├── agent-real-time.md
+│   ├── agent-grey-literature.md
+│   ├── agent-contrarian.md
 │   ├── citation-verification.md
 │   ├── excerpts/                      ← Pre-extracted section excerpts
-│   └── manifest.json
+│   └── manifest.json                  ← Includes `assignments` map (agent-type → provider)
 ├── round2/
 │   └── adversarial-comparison.md
 ├── round3/
@@ -180,9 +279,9 @@ Dispatch a Claude Code background agent that:
 
 ### Graceful degradation
 
-The dispatcher auto-detects which API keys are set and only calls those models. Missing keys are skipped with a notice — no errors, no failures. Even a single model produces useful output that feeds into Rounds 2-4. But **more models = better cross-validation**. Three or more is the sweet spot.
+The dispatcher auto-detects which API keys are set and only runs those agent types. Missing providers are skipped with a notice — no errors, no failures. Even a single agent type produces useful output that feeds into Rounds 2-4. But **more agent types = better cross-validation**. Three or more is the sweet spot.
 
-You can also force specific models: `--models claude,grok,perplexity`
+You can also run a subset of agent types: `--agents academic,contrarian,real-time`
 
 ## Round 2: Adversarial Comparison
 
@@ -229,7 +328,7 @@ Use WebSearch to spot-check 10-15 of these.
 
 ## COMPLETENESS MAP
 What does each report cover that others miss? Create a matrix:
-| Subtopic | Agent 1 | Agent 2 | Agent 3 | Agent 4 | Agent 5 |
+| Subtopic | academic | practitioner | real-time | grey-literature | contrarian |
 Each cell: ✓ (covered in depth), ~ (mentioned), ✗ (absent)
 
 ## INTEGRATION RECOMMENDATIONS
@@ -283,18 +382,20 @@ Dispatch **one integration agent per section** in parallel. Each receives no mor
 
 ### Integration Agent Prompt Template
 
+The excerpt filenames use agent-type names (matching the round1 output files). The manifest `assignments` map records which provider produced each agent-type report, so provenance is always traceable.
+
 ```
 You are integrating ALL available research on [SECTION TOPIC] into a
 single comprehensive section.
 
 Read these files ENTIRELY — they contain ONLY the [SECTION TOPIC]
-content extracted from each model's full report:
+content extracted from each agent type's full report:
 
-1. round1/excerpts/[section]-claude.md
-2. round1/excerpts/[section]-chatgpt.md
-3. round1/excerpts/[section]-perplexity.md
-4. round1/excerpts/[section]-gemini.md
-5. round1/excerpts/[section]-grok.md
+1. round1/excerpts/[section]-academic.md
+2. round1/excerpts/[section]-practitioner.md
+3. round1/excerpts/[section]-real-time.md
+4. round1/excerpts/[section]-grey-literature.md
+5. round1/excerpts/[section]-contrarian.md
 6. round2/adversarial-comparison.md — SECTION: [relevant section]
 
 ## Non-Negotiable Integration Rules
@@ -542,7 +643,7 @@ When `/deep-research [topic]` is invoked:
 8. **Round 2** — dispatch adversarial comparison + citation-laundering detection
 9. **Wait** — comparison must complete before Round 3
 10. **Round 3.1** — dispatch 3 section planners + reconciler in parallel
-11. **Round 3.2** — pre-extract section excerpts per model
+11. **Round 3.2** — pre-extract section excerpts per agent type
 12. **Round 3.3** — dispatch integration agents (parallelize by section)
 13. **Round 3.4** — `scripts/dedup_bib.py` for master bibliography
 14. **Assemble** — combine sections into single draft document
@@ -557,9 +658,9 @@ When `/deep-research [topic]` is invoked:
 
 ## Scaling Guidance
 
-Each model is set to `max_tokens=128000` (or model max) and instructed to produce 15,000-30,000 words per report. This is industrial-strength — each Round 1 output should be 30-50 pages.
+Each agent type is configured to `max_tokens=128000` (or model max) and instructed to produce 15,000-30,000 words per report. This is industrial-strength — each Round 1 output should be 30-50 pages.
 
-| Topic complexity | Round 1 per model | Final Bible | Models × Rounds | Est. cost |
+| Topic complexity | Round 1 per agent | Final Bible | Agents × Rounds | Est. cost |
 |---|---|---|---|---|
 | Narrow (single concept) | 10-15k w | 30-50k w | 3-5 / 1 / 2 / 2 | $10–25 |
 | Medium (multi-faceted) | 15-25k w | 50-80k w | 3-5 / 1 / 4 / 3 | $25–60 |

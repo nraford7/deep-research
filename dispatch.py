@@ -1,20 +1,15 @@
 #!/usr/bin/env python3
 """
-Deep Research Dispatcher — calls available models in parallel.
+Deep Research Dispatcher — runs agent types in parallel, each via a configured provider.
 
-Supported models and their API keys:
-  ANTHROPIC_API_KEY  → Claude (Anthropic)
-  OPENAI_API_KEY     → ChatGPT (OpenAI)
-  PERPLEXITY_API_KEY → Perplexity
-  GOOGLE_API_KEY     → Gemini (Google)
-  XAI_API_KEY        → Grok (xAI)
-
-Only models with a valid API key in the environment are dispatched.
-Missing keys are skipped with a notice — no failures.
+Providers and agent types are defined via TOML config (~/.config/deep-research/config.toml
+or ./deep-research.toml) and API keys loaded from ~/.env / .env.  Built-in providers
+(claude, chatgpt, perplexity, gemini, grok) are activated automatically when their
+API key environment variable is set.
 
 Usage:
   python3 dispatch.py --topic "Oil trading" --scope "Full scope..." --output-dir ./round1/
-  python3 dispatch.py --topic "AI safety" --scope "..." --output-dir ./round1/ --models claude,grok
+  python3 dispatch.py --topic "AI safety" --scope "..." --output-dir ./round1/ --agents academic,contrarian
   python3 dispatch.py --topic "..." --scope "..." --output-dir ./round1/ --max-cost-usd 30 --resume
   python3 dispatch.py --topic "..." --scope "..." --output-dir ./round1/ --languages en,fr,de
   python3 dispatch.py --topic "..." --scope "..." --output-dir ./round1/ --scope-file round0/scope.json
@@ -22,11 +17,14 @@ Usage:
 
 import argparse
 import json
-import os
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+
+import config as cfg
+import llm
 
 # Make sibling scripts/ importable when run as a CLI
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -34,25 +32,6 @@ try:
     from scripts.cost import estimate_run, format_report, enforce_budget
 except ImportError:
     estimate_run = format_report = enforce_budget = None
-
-# Auto-load API keys from ~/.env and .env
-for env_path in [Path.home() / ".env", Path(".env")]:
-    if env_path.exists():
-        for line in env_path.read_text().splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                key, _, val = line.partition("=")
-                key, val = key.strip(), val.strip().strip("'\"")
-                if key and val and key not in os.environ:
-                    os.environ[key] = val
-
-
-def fail_with_install_hint(model: str, package: str):
-    msg = (
-        f"\n  ✗ {model}: Python package '{package}' not installed.\n"
-        f"     Fix: pip install -r requirements.txt   (or: pip install {package})\n"
-    )
-    return {"model": model, "status": "error", "error": msg.strip()}
 
 
 SHARED_RULES = """
@@ -71,49 +50,6 @@ SHARED_RULES = """
     (e.g., "[confidence: medium — single source, no replication]").
 """
 
-MODEL_REGISTRY = {
-    "claude":     {"env_key": "ANTHROPIC_API_KEY", "label": "Claude (Anthropic)", "filename": "agent-1-claude.md"},
-    "chatgpt":    {"env_key": "OPENAI_API_KEY",    "label": "ChatGPT (OpenAI)",    "filename": "agent-2-chatgpt.md"},
-    "perplexity": {"env_key": "PERPLEXITY_API_KEY","label": "Perplexity",          "filename": "agent-3-perplexity.md"},
-    "gemini":     {"env_key": "GOOGLE_API_KEY",    "label": "Gemini (Google)",     "filename": "agent-4-gemini.md"},
-    "grok":       {"env_key": "XAI_API_KEY",       "label": "Grok (xAI)",          "filename": "agent-5-grok.md"},
-}
-
-STRATEGIES = {
-    "claude": """Academic Deep Dive — focus on the most-cited academic papers, NBER/SSRN working papers,
-journal articles, university research, think tank publications, and review articles.
-Find the canonical authors in the field. Follow citation chains. Identify theoretical
-frameworks and empirical debates. Structure as a literature review with theoretical
-underpinnings and empirical findings.""",
-
-    "chatgpt": """Practitioner & Explainer — focus on practical, applied, how-it-works sources.
-Industry white papers, consulting reports, trade publications, professional guides,
-technical documentation, methodology documents, company reports. Find the best
-explainers and how-to guides. Include data tables, process descriptions, and
-real-world examples. Structure for a practitioner audience.""",
-
-    "perplexity": """Real-Time Web Intelligence — focus on current, up-to-date information.
-Search extensively for recent sources (last 1-3 years). Find recent news articles,
-government reports, regulatory filings, press releases, current data, recent
-conference proceedings. Identify what has changed recently, current controversies,
-recent policy changes, emerging trends. Verify current figures and statistics.
-Structure around current state and recent developments.""",
-
-    "gemini": """Grey Literature & Primary Sources — focus on primary documents and original data.
-Government reports, international organization publications (UN, World Bank, IMF, OECD),
-NGO reports, official datasets, legal documents, treaties, standards, congressional
-testimony, regulatory dockets. Find the PRIMARY source behind secondary claims.
-If a paper cites a government report, find the report. Structure around documentary
-evidence and original-source citations.""",
-
-    "grok": """Contrarian & Cross-Disciplinary Analysis — challenge conventional narratives.
-Search for dissenting academic views, minority positions in policy debates,
-cross-disciplinary insights (e.g., complexity science applied to markets, network
-theory applied to supply chains), unconventional data sources, and perspectives
-from outside the mainstream Western institutional framework. Find what the other
-research strategies are likely to miss. Structure around alternative framings,
-overlooked evidence, and underrepresented perspectives.""",
-}
 
 
 def build_prompt(topic, scope, strategy, languages=None, domain_priorities=None):
@@ -157,159 +93,122 @@ def build_prompt(topic, scope, strategy, languages=None, domain_priorities=None)
 """
 
 
-# --- Model callers ---
+def agent_filename(agent_type_name):
+    return f"agent-{agent_type_name}.md"
 
-def call_claude(prompt, output_path):
-    try:
-        import anthropic
-    except ImportError:
-        return fail_with_install_hint("claude", "anthropic")
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+def run_agent(provider, agent_type, prompt, output_path):
     start = time.time()
-    msg = client.messages.create(
-        model="claude-opus-4-20250514",
-        max_tokens=128000,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    text = msg.content[0].text
+    text = llm.call_model(provider, agent_type.system_prompt, prompt)
     output_path.write_text(text, encoding="utf-8")
-    return _result("claude", text, start, output_path)
+    return {"agent_type": agent_type.name, "provider": provider.name, "model": provider.model,
+            "status": "ok", "words": len(text.split()), "seconds": round(time.time() - start, 1),
+            "file": str(output_path)}
 
 
-def call_chatgpt(prompt, output_path):
-    try:
-        from openai import OpenAI
-    except ImportError:
-        return fail_with_install_hint("chatgpt", "openai")
-    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-    start = time.time()
-    resp = client.chat.completions.create(
-        model="gpt-4.1",
-        max_tokens=32768,
-        messages=[
-            {"role": "system", "content": "You are a deep research analyst producing comprehensive, fact-checked, evidence-based research reports with full citations. Produce the COMPLETE report in a single response. Do NOT ask for confirmation or suggest splitting into parts. Write the full report now."},
-            {"role": "user", "content": prompt},
-        ],
-    )
-    text = resp.choices[0].message.content
-    output_path.write_text(text, encoding="utf-8")
-    return _result("chatgpt", text, start, output_path)
+def run_job(topic, scope, output_dir, providers, agents, languages, domain_priorities,
+            resume, seed):
+    output_dir = Path(output_dir); output_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = output_dir / "manifest.json"
 
-
-def call_perplexity(prompt, output_path):
-    try:
-        from openai import OpenAI
-    except ImportError:
-        return fail_with_install_hint("perplexity", "openai")
-    client = OpenAI(api_key=os.environ["PERPLEXITY_API_KEY"], base_url="https://api.perplexity.ai")
-    start = time.time()
-    resp = client.chat.completions.create(
-        model="sonar-deep-research",
-        max_tokens=128000,
-        messages=[
-            {"role": "system", "content": "You are a deep research analyst. Use your web search capabilities extensively to find and cite real, verifiable sources. Every claim must have a citation."},
-            {"role": "user", "content": prompt},
-        ],
-    )
-    text = resp.choices[0].message.content
-    output_path.write_text(text, encoding="utf-8")
-    return _result("perplexity", text, start, output_path)
-
-
-def call_gemini(prompt, output_path):
-    try:
-        from google import genai
-    except ImportError:
+    existing = {}
+    if resume and manifest_path.exists():
         try:
-            import google.generativeai as genai_legacy
-            return _call_gemini_legacy(genai_legacy, prompt, output_path)
-        except ImportError:
-            return fail_with_install_hint("gemini", "google-genai")
+            existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            existing = {}
+    prior_assignments = existing.get("assignments") if resume else None
+    assignments, warnings = cfg.resolve_assignments(agents, providers, seed=seed,
+                                                     prior_assignments=prior_assignments)
+    for w in warnings:
+        print(f"  ! {w}", flush=True)
 
-    client = genai.Client(api_key=os.environ["GOOGLE_API_KEY"])
-    start = time.time()
+    prior_ok = {r["agent_type"] for r in existing.get("results", [])
+                if isinstance(r, dict) and r.get("status") == "ok" and "agent_type" in r} if resume else set()
 
-    def _is_overload(exc) -> bool:
-        # Detect Google-side overload/availability errors using structured codes
-        # where available; only fall back to substring on the very last resort.
-        for attr in ("status_code", "code"):
-            code = getattr(exc, attr, None)
-            if isinstance(code, int) and code in (429, 500, 503):
-                return True
-        # google.genai.errors has typed exception classes; match by class name
-        # without importing the module (it varies across SDK versions).
-        cls = type(exc).__name__
-        if cls in ("ServerError", "ResourceExhausted", "UnavailableError"):
-            return True
-        return False
+    sems = {n: threading.Semaphore(p.max_concurrency) for n, p in providers.items() if p.max_concurrency}
 
-    last_error = None
-    for model_id in ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"]:
+    def _guarded(provider, agent_type, prompt, path):
+        sem = sems.get(provider.name)
+        if sem: sem.acquire()
         try:
-            response = client.models.generate_content(
-                model=model_id,
-                contents=prompt,
-                config=genai.types.GenerateContentConfig(max_output_tokens=65536),
-            )
-            text = response.text
-            output_path.write_text(text, encoding="utf-8")
-            return _result("gemini", text, start, output_path)
-        except Exception as e:
-            if _is_overload(e):
-                last_error = e
-                continue
-            raise
-    return {"model": "gemini", "status": "error",
-            "error": f"All Gemini models unavailable: {type(last_error).__name__ if last_error else 'unknown'}: {last_error}"}
+            return run_agent(provider, agent_type, prompt, path)
+        finally:
+            if sem: sem.release()
 
+    todo = []
+    for name, at in agents.items():
+        path = output_dir / agent_filename(name)
+        if resume and name in prior_ok and path.exists() and path.stat().st_size > 4000:
+            continue
+        todo.append((name, at, path))
 
-def _call_gemini_legacy(genai, prompt, output_path):
-    genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
-    model = genai.GenerativeModel("gemini-2.5-flash")
-    start = time.time()
-    response = model.generate_content(prompt, generation_config=genai.types.GenerationConfig(max_output_tokens=16000))
-    text = response.text
-    output_path.write_text(text, encoding="utf-8")
-    return _result("gemini", text, start, output_path)
+    degraded = {name for name in agents
+                if agents[name].requires_web_search
+                and "web_search" not in providers[assignments[name]].capabilities}
 
+    todo_names = {t[0] for t in todo}
+    skipped_names = [name for name in agents if name not in todo_names]
+    if resume and skipped_names:
+        print(f"Resume: skipping {len(skipped_names)} agent type(s) with existing output: "
+              f"{', '.join(skipped_names)}", flush=True)
+    if todo:
+        print(f"Dispatching {len(todo)} agent type(s) in parallel: "
+              f"{', '.join(name for name, _, _ in todo)}", flush=True)
+    else:
+        print("All selected agent types already have output (resume). Nothing to run.", flush=True)
 
-def call_grok(prompt, output_path):
-    try:
-        from openai import OpenAI
-    except ImportError:
-        return fail_with_install_hint("grok", "openai")
-    client = OpenAI(api_key=os.environ["XAI_API_KEY"], base_url="https://api.x.ai/v1")
-    start = time.time()
-    resp = client.chat.completions.create(
-        model="grok-3-latest",
-        max_tokens=128000,
-        messages=[
-            {"role": "system", "content": "You are a deep research analyst producing comprehensive, fact-checked, evidence-based research reports with full citations. Challenge conventional narratives where evidence warrants it."},
-            {"role": "user", "content": prompt},
-        ],
-    )
-    text = resp.choices[0].message.content
-    output_path.write_text(text, encoding="utf-8")
-    return _result("grok", text, start, output_path)
+    results = []
+    with ThreadPoolExecutor(max_workers=max(1, len(todo))) as ex:
+        futs = {}
+        for name, at, path in todo:
+            provider = providers[assignments[name]]
+            prompt = build_prompt(topic, scope, at.strategy, languages=languages,
+                                  domain_priorities=domain_priorities)
+            futs[ex.submit(_guarded, provider, at, prompt, path)] = name
+        for fut in as_completed(futs):
+            name = futs[fut]
+            try:
+                r = fut.result(); results.append(r)
+                if r.get("status") == "ok" and name in degraded:
+                    fp = Path(r["file"])
+                    fp.write_text("> [no live web search — knowledge-cutoff results]\n\n"
+                                  + fp.read_text(encoding="utf-8"), encoding="utf-8")
+                print(f"  ✓ {name}: {r['words']} words via {r['provider']} → {r['file']}", flush=True)
+            except Exception as e:
+                results.append({"agent_type": name, "provider": assignments[name], "status": "error",
+                                "error": str(e)})
+                print(f"  ✗ {name}: {e}", flush=True)
 
+    # Tag degraded agents that were skipped on resume (their existing file wasn't re-run).
+    for name in degraded:
+        if name in todo_names:
+            continue
+        fp = output_dir / agent_filename(name)
+        if fp.exists():
+            text = fp.read_text(encoding="utf-8")
+            if not text.startswith("> [no live web search"):
+                fp.write_text("> [no live web search — knowledge-cutoff results]\n\n" + text,
+                              encoding="utf-8")
 
-CALLERS = {
-    "claude": call_claude,
-    "chatgpt": call_chatgpt,
-    "perplexity": call_perplexity,
-    "gemini": call_gemini,
-    "grok": call_grok,
-}
+    by_type = {r["agent_type"]: r for r in existing.get("results", []) if isinstance(r, dict) and "agent_type" in r}
+    for r in results:
+        by_type[r["agent_type"]] = r
+    manifest = {"topic": topic, "scope": scope, "languages": languages,
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "assignments": assignments, "warnings": warnings,
+                "results": list(by_type.values())}
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
+    new_ok = sum(1 for r in results if isinstance(r, dict) and r.get("status") == "ok")
+    new_words = sum(r.get("words", 0) for r in results if isinstance(r, dict) and r.get("status") == "ok")
+    total_ok = sum(1 for r in manifest["results"] if isinstance(r, dict) and r.get("status") == "ok")
+    print(f"\n{'='*50}", flush=True)
+    print(f"Done: {new_ok} newly run ({new_words:,} words), "
+          f"{len(skipped_names)} skipped; {total_ok}/{len(agents)} agent types complete.", flush=True)
+    print(f"Manifest: {manifest_path}", flush=True)
 
-def _result(model, text, start, path):
-    return {
-        "model": model,
-        "status": "ok",
-        "words": len(text.split()),
-        "seconds": round(time.time() - start, 1),
-        "file": str(path),
-    }
+    return manifest
 
 
 def load_scope_brief(scope_file):
@@ -354,13 +253,12 @@ def main():
     parser.add_argument("--topic", required=True, help="Research topic")
     parser.add_argument("--scope", required=True, help="Detailed scope description")
     parser.add_argument("--output-dir", required=True, help="Output directory for round 1 files")
-    parser.add_argument("--models", default="auto",
-                        help="Comma-separated models (claude,chatgpt,perplexity,gemini,grok) or 'auto'")
+    parser.add_argument("--agents", default="all", help="Comma-separated agent types to run, or 'all'")
     parser.add_argument("--languages", default="en", help="Search languages, e.g. en,fr,de,zh")
     parser.add_argument("--scope-file", help="JSON or markdown from scripts/scope.py — injects domain priorities")
     parser.add_argument("--max-cost-usd", type=float, help="Hard cap on estimated full-run cost")
     parser.add_argument("--resume", action="store_true",
-                        help="Skip models whose output file already exists in --output-dir")
+                        help="Skip agent types whose output file already exists in --output-dir")
     parser.add_argument("--no-confirm", action="store_true", help="Skip the interactive cost prompt")
     parser.add_argument("--estimate-only", action="store_true", help="Print cost estimate and exit")
     args = parser.parse_args()
@@ -370,140 +268,69 @@ def main():
     languages = [l.strip() for l in args.languages.split(",") if l.strip()]
     domain_priorities = load_scope_brief(args.scope_file)
 
-    if args.models == "auto":
-        candidates = list(MODEL_REGISTRY.keys())
-    else:
-        candidates = [m.strip() for m in args.models.split(",")]
+    env = cfg.load_env_files()
+    providers, agents = cfg.load_config(cfg.default_toml_paths(), env)
 
-    available, skipped = [], []
-    for name in candidates:
-        if name not in MODEL_REGISTRY:
-            skipped.append((name, "unknown model"))
-            continue
-        env_key = MODEL_REGISTRY[name]["env_key"]
-        if os.environ.get(env_key):
-            available.append(name)
-        else:
-            skipped.append((name, f"{env_key} not set"))
+    if args.agents != "all":
+        wanted = [a.strip() for a in args.agents.split(",") if a.strip()]
+        unknown = [a for a in wanted if a not in agents]
+        if unknown:
+            raise SystemExit(f"Unknown agent types: {', '.join(unknown)}")
+        agents = {k: v for k, v in agents.items() if k in wanted}
 
-    resumed_skip = []
-    if args.resume:
-        # Authoritative source for "this model already succeeded": the manifest
-        # status. File size is a poor proxy — an API 4xx error trace can land
-        # at 2-5 KB and look like a real response. We accept a prior result
-        # only when manifest says ok AND the file is on disk AND non-trivial.
-        existing_manifest = {}
-        manifest_check = output_dir / "manifest.json"
-        if manifest_check.exists():
-            try:
-                existing_manifest = json.loads(manifest_check.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                existing_manifest = {}
-        prior_ok = {
-            r["model"]
-            for r in (existing_manifest.get("results") or [])
-            if isinstance(r, dict) and r.get("status") == "ok"
-        }
-        runnable = []
-        for name in available:
-            target = output_dir / MODEL_REGISTRY[name]["filename"]
-            if name in prior_ok and target.exists() and target.stat().st_size > 4000:
-                resumed_skip.append(name)
-            else:
-                runnable.append(name)
-        available = runnable
-
-    if skipped:
-        print("Skipping (no API key):", flush=True)
-        for name, reason in skipped:
-            print(f"  · {name}: {reason}", flush=True)
-        print(flush=True)
-    if resumed_skip:
-        print(f"Resume: skipping {len(resumed_skip)} models with existing output: {', '.join(resumed_skip)}", flush=True)
-        print(flush=True)
-
-    if not available:
-        if resumed_skip:
-            print("All models already have output. Nothing to do (use without --resume to re-run).", flush=True)
-            return
-        print("ERROR: No models available. Set at least one API key:", flush=True)
-        for name, info in MODEL_REGISTRY.items():
-            print(f"  {info['env_key']:25s} → {info['label']}", flush=True)
+    if not providers:
+        print("ERROR: No providers available. Set at least one API key or define a [providers.*] block.", file=sys.stderr)
         raise SystemExit(1)
+
+    if not agents:
+        raise SystemExit("No agent types selected — check the --agents filter.")
 
     # Cost preflight
     if estimate_run is not None:
-        prompt_sample = build_prompt(args.topic, args.scope, STRATEGIES[available[0]],
+        manifest_path = output_dir / "manifest.json"
+        preflight_prior = None
+        if args.resume and manifest_path.exists():
+            try:
+                preflight_prior = json.loads(manifest_path.read_text(encoding="utf-8")).get("assignments")
+            except json.JSONDecodeError:
+                pass
+        preflight_assignments, _ = cfg.resolve_assignments(agents, providers, seed=0,
+                                                            prior_assignments=preflight_prior)
+        # Build a sample prompt from the first assigned agent's strategy
+        first_agent_name = next(iter(preflight_assignments))
+        sample_strategy = agents[first_agent_name].strategy
+        prompt_sample = build_prompt(args.topic, args.scope, sample_strategy,
                                      languages=languages, domain_priorities=domain_priorities)
         prompt_words = len(prompt_sample.split())
-        estimate = estimate_run(available, prompt_words=prompt_words, output_words=25000)
+        estimate = estimate_run(preflight_assignments, providers, prompt_words=prompt_words, output_words=25000)
         print(format_report(estimate), flush=True)
         if args.estimate_only:
             return
         if not enforce_budget(estimate, args.max_cost_usd, prompt=not args.no_confirm):
             raise SystemExit(2)
-    elif args.max_cost_usd is not None:
-        print("  warn: scripts/cost.py unavailable, --max-cost-usd ignored", file=sys.stderr)
+    else:
+        if args.estimate_only:
+            raise SystemExit("--estimate-only requires scripts/cost.py, which failed to import.")
+        if args.max_cost_usd is not None:
+            print("  warn: scripts/cost.py unavailable, --max-cost-usd ignored", file=sys.stderr)
 
-    print(f"\nDispatching {len(available)} model(s) in parallel: {', '.join(available)}", flush=True)
     if languages != ["en"]:
         print(f"Languages: {', '.join(languages)}", flush=True)
     if domain_priorities:
         print(f"Domain scope: injected ({len(domain_priorities)} chars)", flush=True)
     print(flush=True)
 
-    results = []
-    with ThreadPoolExecutor(max_workers=len(available)) as executor:
-        futures = {}
-        for name in available:
-            prompt = build_prompt(args.topic, args.scope, STRATEGIES[name],
-                                  languages=languages, domain_priorities=domain_priorities)
-            path = output_dir / MODEL_REGISTRY[name]["filename"]
-            futures[executor.submit(CALLERS[name], prompt, path)] = name
-
-        for future in as_completed(futures):
-            name = futures[future]
-            try:
-                result = future.result()
-                results.append(result)
-                if result["status"] == "ok":
-                    print(f"  ✓ {name}: {result['words']} words in {result['seconds']}s → {result['file']}", flush=True)
-                else:
-                    print(f"  ✗ {name}: {result['error']}", flush=True)
-            except Exception as e:
-                results.append({"model": name, "status": "error", "error": str(e)})
-                print(f"  ✗ {name}: {e}", flush=True)
-
-    manifest_path = output_dir / "manifest.json"
-    existing = {}
-    if args.resume and manifest_path.exists():
-        try:
-            existing = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            existing = {}
-    prior_results = existing.get("results", [])
-    prior_by_model = {r["model"]: r for r in prior_results if isinstance(r, dict) and "model" in r}
-    for r in results:
-        prior_by_model[r["model"]] = r
-    merged_results = list(prior_by_model.values())
-
-    manifest = {
-        "topic": args.topic,
-        "scope": args.scope,
-        "languages": languages,
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "models_dispatched": available,
-        "models_resumed": resumed_skip,
-        "models_skipped": [{"model": n, "reason": r} for n, r in skipped],
-        "results": merged_results,
-    }
-    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-
-    ok_count = sum(1 for r in results if r["status"] == "ok")
-    total_words = sum(r.get("words", 0) for r in results if r["status"] == "ok")
-    print(f"\n{'='*50}", flush=True)
-    print(f"Done: {ok_count}/{len(available)} models succeeded, {total_words:,} new words", flush=True)
-    print(f"Manifest: {manifest_path}", flush=True)
+    run_job(
+        topic=args.topic,
+        scope=args.scope,
+        output_dir=output_dir,
+        providers=providers,
+        agents=agents,
+        languages=languages,
+        domain_priorities=domain_priorities,
+        resume=args.resume,
+        seed=0,
+    )
 
 
 if __name__ == "__main__":
