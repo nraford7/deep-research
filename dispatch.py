@@ -18,6 +18,7 @@ Usage:
 import argparse
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -152,7 +153,46 @@ def call_gemini(client, provider, agent_type, prompt, output_path):
             last = e
     raise RuntimeError(f"All Gemini models failed for provider '{provider.name}': {last}")
 
-DISPATCH = {"openai": call_openai, "anthropic": call_anthropic, "gemini": call_gemini}
+CLI_TIMEOUT_S = 1800  # reports are long; generous timeout
+
+
+def _cli_argv_and_input(provider, agent_type, prompt):
+    base = os.path.basename(provider.command)
+    if base == "claude":
+        argv = [provider.command, "-p", "--system-prompt", agent_type.system_prompt]
+        if provider.model:
+            argv += ["--model", provider.model]
+        argv += list(provider.extra_args)
+        return argv, prompt                      # user prompt via stdin
+    if base == "codex":
+        argv = [provider.command, "exec"]
+        if provider.model:
+            argv += ["--model", provider.model]
+        argv += list(provider.extra_args)
+        return argv, f"{agent_type.system_prompt}\n\n{prompt}"  # system prepended (no dedicated flag)
+    # generic: pass everything via stdin
+    argv = [provider.command] + list(provider.extra_args)
+    return argv, f"{agent_type.system_prompt}\n\n{prompt}"
+
+
+def call_cli(client, provider, agent_type, prompt, output_path):
+    argv, stdin_text = _cli_argv_and_input(provider, agent_type, prompt)
+    env = dict(os.environ)
+    env.pop("ANTHROPIC_API_KEY", None)   # force subscription auth, not metered API
+    env.pop("OPENAI_API_KEY", None)
+    proc = subprocess.run(argv, input=stdin_text, capture_output=True, text=True,
+                          env=env, timeout=CLI_TIMEOUT_S)
+    if proc.returncode != 0:
+        raise RuntimeError(f"provider '{provider.name}' CLI exited {proc.returncode}: "
+                           f"{proc.stderr.strip()[:500]}")
+    text = proc.stdout.strip()
+    if not text:
+        raise RuntimeError(f"provider '{provider.name}' returned an empty response")
+    output_path.write_text(text, encoding="utf-8")
+    return text
+
+
+DISPATCH = {"openai": call_openai, "anthropic": call_anthropic, "gemini": call_gemini, "cli": call_cli}
 
 
 def agent_filename(agent_type_name):
@@ -160,6 +200,8 @@ def agent_filename(agent_type_name):
 
 
 def make_client(provider):
+    if provider.api_type == "cli":
+        return None                                # no SDK client; subprocess handles auth
     if provider.api_type == "anthropic":
         import anthropic
         return anthropic.Anthropic(api_key=provider.api_key)

@@ -46,6 +46,68 @@ TOML config **augments** `~/.env` — built-in providers still activate automati
 
 > **Model-ID drift warning:** Provider model IDs change. For example, DeepSeek legacy IDs `deepseek-reasoner` and `deepseek-chat` retire 2026-07-24 in favour of `deepseek-v4-*`; GLM model IDs also shift. Always verify the current ID in the provider's docs. `max_tokens` must stay within each model's output cap — exceeding it causes a 400 error.
 
+### CLI / subscription providers (`api_type = "cli"`)
+
+Providers can run a local CLI tool — `claude -p` or `codex exec` — that authenticates via your SSO subscription (Claude Pro/Max, ChatGPT) rather than a paid API key. No per-token cost.
+
+**Config fields:**
+
+| Field | Required | Notes |
+|---|---|---|
+| `api_type` | yes | `"cli"` |
+| `command` | yes | Binary name or path (`"claude"`, `"codex"`). Provider is skipped if the binary is not on PATH. |
+| `model` | no | Passed as `--model` to the CLI. Omit to use the CLI's own default. |
+| `extra_args` | no | List of extra flags passed verbatim to the CLI (e.g. `["--allowedTools", "WebSearch", "WebFetch"]` to enable read-only live web search). |
+| `capabilities` | no | Same as other providers — set `["web_search"]` only if the CLI can deliver live results (see caveat below). |
+| `max_concurrency` | no | Throttle concurrent invocations. |
+
+No `api_key` or `api_key_env` is needed or used.
+
+**Auth — key scrubbing:** `call_cli` removes `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` from the subprocess environment before invoking the binary, so the CLI falls back to subscription auth rather than charging a metered API key.
+
+**How each CLI is invoked:**
+
+- `claude`: `claude -p --system-prompt <system> [--model M] [extra_args...]`, prompt via stdin.
+- `codex`: `codex exec [--model M] [extra_args...]`, system prompt prepended to stdin (codex has no dedicated system-prompt flag).
+- Any other binary: `<command> [extra_args...]`, system prompt prepended to stdin.
+
+**Tool-use caveat (real-time agent type):** `claude -p` blocks tools by default — a live run shows "WebSearch is blocked in the current permission mode". A cli provider mapped to the `real-time` agent type will therefore return knowledge-cutoff results, not live web search, unless you explicitly opt in via `extra_args`.
+
+**Recommended — read-only web search:**
+```toml
+extra_args   = ["--allowedTools", "WebSearch", "WebFetch"]
+capabilities = ["web_search"]
+```
+This enables live web search **without** Bash/Edit/Write access. Combined with `capabilities = ["web_search"]`, the provider becomes eligible for the `real-time` agent type — so you can run the real-time pass using a Claude Pro/Max subscription at **$0 API cost** instead of Perplexity.
+
+**Nuclear option (not recommended for unattended subprocesses):**
+```toml
+extra_args = ["--dangerously-skip-permissions"]
+```
+This also enables live web search, but *additionally* enables Bash, Edit, Write, and other tools in your current working directory. Avoid for an automated subprocess you don't want touching your filesystem.
+
+Perplexity's `sonar-deep-research` model is still stronger for live research; the subscription route is the tradeoff of cost ($0) against depth.
+
+**Cost display:** cli providers show `subscription — no metered API cost` in the pre-flight estimate; their contribution to the Round 1 total is $0.
+
+**Example:**
+
+```toml
+[providers.claude-sub]
+api_type     = "cli"
+command      = "claude"
+# model      = "claude-opus-4-20250514"
+extra_args   = ["--allowedTools", "WebSearch", "WebFetch"]   # read-only web; no Bash/Edit/Write
+capabilities = ["web_search"]                                 # makes it real-time-eligible
+
+[agents.academic]
+provider = "claude-sub"   # route academic agent through subscription, saving API cost
+
+[agents.real-time]
+provider = "claude-sub"   # live web search at $0 — Perplexity sonar-deep-research is
+                          # stronger, but this is a free alternative
+```
+
 ## When to Use
 
 - User asks for deep research, comprehensive analysis, or evidence-based report on a topic

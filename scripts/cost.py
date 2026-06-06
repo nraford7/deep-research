@@ -30,6 +30,9 @@ def words_to_tokens(words: int) -> int:
 
 
 def estimate_assignment(agent_type, provider, prompt_words, output_words):
+    if provider.api_type == "cli":
+        return {"agent_type": agent_type, "provider": provider.name, "excluded": True,
+                "note": "subscription — no metered API cost", "total": 0.0}
     p = provider.pricing
     if not p or "in" not in p or "out" not in p:
         return {"agent_type": agent_type, "provider": provider.name, "excluded": True,
@@ -65,7 +68,7 @@ def format_report(estimate: dict) -> str:
     lines.append("  " + "-" * 104)
     for r in estimate["per_agent"]:
         if r.get("excluded"):
-            lines.append(f"  {r['agent_type']:<20}{r['provider']:<14}{'unknown — excluded'}")
+            lines.append(f"  {r['agent_type']:<20}{r['provider']:<14}{r.get('note', 'unknown — excluded')}")
             continue
         lines.append(
             f"  {r['agent_type']:<20}{r['provider']:<14}{r.get('model', ''):<26}"

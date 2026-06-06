@@ -205,3 +205,33 @@ def test_resolve_assignments_empty_dict_prior_recomputes():
     agents = dict(config.BUILTIN_AGENT_TYPES)
     assignments, warnings = config.resolve_assignments(agents, providers, seed=0, prior_assignments={})
     assert set(assignments) == set(agents)   # {} prior is stale (missing all agents) -> recompute
+
+
+def test_cli_provider_parsed_when_binary_present(tmp_path):
+    # use a binary guaranteed to exist on PATH
+    p = tmp_path / "c.toml"
+    p.write_text('[providers.sub]\napi_type="cli"\ncommand="sh"\n')   # no model/key required
+    providers, _ = config.load_config(toml_paths=[p], env={})
+    assert "sub" in providers
+    assert providers["sub"].api_type == "cli" and providers["sub"].command == "sh"
+    assert providers["sub"].api_key == ""
+
+def test_cli_provider_skipped_when_binary_absent(tmp_path):
+    p = tmp_path / "c.toml"
+    p.write_text('[providers.ghost]\napi_type="cli"\ncommand="definitely-not-a-real-binary-xyz"\n')
+    providers, _ = config.load_config(toml_paths=[p], env={})
+    assert "ghost" not in providers
+
+def test_cli_provider_missing_command_errors(tmp_path):
+    p = tmp_path / "c.toml"
+    p.write_text('[providers.bad]\napi_type="cli"\n')   # no command
+    try:
+        config.load_config(toml_paths=[p], env={}); assert False, "expected ConfigError"
+    except config.ConfigError:
+        pass
+
+def test_cli_provider_extra_args_parsed(tmp_path):
+    p = tmp_path / "c.toml"
+    p.write_text('[providers.sub]\napi_type="cli"\ncommand="sh"\nextra_args=["--allowedTools","WebSearch"]\n')
+    providers, _ = config.load_config(toml_paths=[p], env={})
+    assert providers["sub"].extra_args == ("--allowedTools", "WebSearch")

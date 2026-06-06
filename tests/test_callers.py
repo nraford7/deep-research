@@ -150,3 +150,67 @@ def test_call_openai_empty_choices_raises(tmp_path):
     import pytest
     with pytest.raises(RuntimeError, match="empty response"):
         dispatch.call_openai(client, prov, at, "PROMPT", tmp_path / "o.md")
+
+
+def test_call_cli_generic_pipes_system_and_prompt(tmp_path):
+    # 'cat' echoes stdin; generic path sends "SYS\n\nPROMPT"
+    prov = config.Provider("sub", "cli", "", "", command="cat")
+    at = config.AgentType("academic", "STRAT", "SYS")
+    out = tmp_path / "o.md"
+    text = dispatch.call_cli(None, prov, at, "PROMPT", out)
+    assert text == "SYS\n\nPROMPT" and out.read_text() == "SYS\n\nPROMPT"
+
+def test_call_cli_scrubs_api_keys_from_subprocess_env(tmp_path, monkeypatch):
+    # a script that reports both ANTHROPIC_API_KEY and OPENAI_API_KEY values
+    script = tmp_path / "probe.sh"
+    script.write_text('#!/bin/sh\necho "A=$ANTHROPIC_API_KEY|O=$OPENAI_API_KEY"\n')
+    script.chmod(0o755)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-anthropic-should-be-scrubbed")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-should-be-scrubbed")
+    prov = config.Provider("sub", "cli", "", "", command=str(script))
+    at = config.AgentType("academic", "S", "SYS")
+    text = dispatch.call_cli(None, prov, at, "PROMPT", tmp_path / "o.md")
+    assert "sk-anthropic-should-be-scrubbed" not in text
+    assert "sk-openai-should-be-scrubbed" not in text
+    assert "A=|O=" in text
+
+def test_call_cli_nonzero_exit_raises(tmp_path):
+    script = tmp_path / "fail.sh"
+    script.write_text('#!/bin/sh\necho "boom" >&2\nexit 3\n'); script.chmod(0o755)
+    prov = config.Provider("sub", "cli", "", "", command=str(script))
+    at = config.AgentType("academic", "S", "SYS")
+    import pytest
+    with pytest.raises(RuntimeError, match="exited 3"):
+        dispatch.call_cli(None, prov, at, "PROMPT", tmp_path / "o.md")
+
+def test_cli_argv_builder_claude_and_codex():
+    at = config.AgentType("real-time", "S", "SYSPROMPT")
+    pc = config.Provider("c", "cli", "", "claude-opus-4-20250514", command="/usr/local/bin/claude")
+    argv, stdin = dispatch._cli_argv_and_input(pc, at, "USERPROMPT")
+    assert argv[:4] == ["/usr/local/bin/claude", "-p", "--system-prompt", "SYSPROMPT"]
+    assert "--model" in argv and "claude-opus-4-20250514" in argv and stdin == "USERPROMPT"
+    px = config.Provider("x", "cli", "", "", command="codex")
+    argv2, stdin2 = dispatch._cli_argv_and_input(px, at, "USERPROMPT")
+    assert argv2[:2] == ["codex", "exec"] and "--model" not in argv2 and stdin2 == "SYSPROMPT\n\nUSERPROMPT"
+
+
+def test_cli_extra_args_appended():
+    at = config.AgentType("academic", "S", "SYS")
+    p = config.Provider("c", "cli", "", "", command="claude", extra_args=("--allowedTools", "WebSearch"))
+    argv, _ = dispatch._cli_argv_and_input(p, at, "PROMPT")
+    assert argv[-2:] == ["--allowedTools", "WebSearch"]
+
+
+def test_call_cli_scrubs_api_keys_from_subprocess_env_both_keys(tmp_path, monkeypatch):
+    # Probe both ANTHROPIC_API_KEY and OPENAI_API_KEY
+    script = tmp_path / "probe2.sh"
+    script.write_text('#!/bin/sh\necho "A=$ANTHROPIC_API_KEY|O=$OPENAI_API_KEY"\n')
+    script.chmod(0o755)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-anthropic-secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-secret")
+    prov = config.Provider("sub", "cli", "", "", command=str(script))
+    at = config.AgentType("academic", "S", "SYS")
+    text = dispatch.call_cli(None, prov, at, "PROMPT", tmp_path / "o.md")
+    assert "sk-anthropic-secret" not in text
+    assert "sk-openai-secret" not in text
+    assert "A=|O=" in text

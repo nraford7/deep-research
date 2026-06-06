@@ -26,3 +26,10 @@ def test_estimate_search_surcharge_when_fields_present():
     no_fee = cost.estimate_run(plain, {"p": providers["p"]}, 1000, 1000)["total"]
     with_fee = cost.estimate_run(searcher, {"s": providers["s"]}, 1000, 1000)["total"]
     assert with_fee > no_fee
+
+
+def test_estimate_cli_provider_is_subscription_no_cost():
+    prov = config.Provider("sub", "cli", "", "", command="claude")
+    est = cost.estimate_run({"academic": "sub"}, {"sub": prov}, 1000, 1000)
+    row = est["per_agent"][0]
+    assert row["total"] == 0.0 and "subscription" in row["note"].lower()

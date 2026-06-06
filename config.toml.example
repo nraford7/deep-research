@@ -3,31 +3,97 @@
 # is gitignored; do NOT put real keys in this example file.
 # Augments ~/.env: built-in providers (claude/chatgpt/perplexity/gemini/grok) still work
 # from env keys; entries here add or override providers and remap agent types.
+#
+# MODEL-ID DRIFT: provider model IDs change. Always verify the current ID on the
+# provider's site; the examples below reflect 2026-06 but may drift. max_tokens must
+# stay within each model's output cap — exceeding it causes a 400 error.
 
+# ---------------------------------------------------------------------------
+# EXAMPLE A: diverse multi-provider setup
+# Principle: reach different model lineages; avoid paying a middleman for models
+# you can get cheaper direct.
+# ---------------------------------------------------------------------------
+
+# DeepSeek direct — cheaper than via OpenRouter for DeepSeek models
 [providers.deepseek]
-api_type     = "openai"
-api_key      = "sk-xxxx"
-base_url     = "https://api.deepseek.com/v1"
-model        = "deepseek-v4-pro"          # deepseek-reasoner/-chat retire 2026-07-24
-max_tokens   = 32768                       # must be <= the model's output cap or the call 400s
-pricing      = { in = 0.55, out = 2.19 }
+api_type   = "openai"
+api_key    = "sk-xxxx"                     # or: api_key_env = "DEEPSEEK_KEY"
+base_url   = "https://api.deepseek.com/v1"
+model      = "deepseek-v4-pro"             # also deepseek-v4-flash (cheaper); legacy
+                                            # deepseek-chat/deepseek-reasoner retire 2026-07-24
+max_tokens = 32768
+pricing    = { in = 0.55, out = 2.19 }
 
+# OpenRouter — best for reaching model lineages you can't get direct
+# (Kimi/GLM/Microsoft etc). Not the cheapest path for DeepSeek or Anthropic.
+[providers.kimi]
+api_type   = "openai"
+api_key    = "sk-or-xxxx"
+base_url   = "https://openrouter.ai/api/v1"
+model      = "moonshotai/kimi-k2.6"        # verify current id at openrouter.ai/models
+max_tokens = 32768
+
+# Fireworks — account-scoped model IDs
 [providers.glm]
 api_type   = "openai"
-api_key    = "xxxx"
-# api_key_env = "GLM_KEY"                  # alternative to inline api_key: read from this env var
-base_url   = "https://open.bigmodel.cn/api/paas/v4"
-model      = "glm-4.6"                      # verify current id; glm-4-plus may be retired
+api_key    = "fw_xxxx"
+base_url   = "https://api.fireworks.ai/inference/v1"
+model      = "accounts/fireworks/models/glm-5p1"   # verify current id at fireworks.ai/models
 max_tokens = 32768
-# capabilities omitted -> NOT eligible for the real-time agent type
-# max_concurrency = 2                       # throttle if the key has a tight rate limit
 
-# Remap a built-in agent type to a custom provider:
+# Web-enabled subscription provider — live web search at $0 API cost
+# claude -p blocks tools by default; --allowedTools WebSearch WebFetch opts in
+# read-only (no Bash/Edit/Write). This makes it eligible for the real-time agent
+# type via capabilities = ["web_search"].
+# --dangerously-skip-permissions ALSO enables live web search but additionally
+# enables Bash/Edit/Write — avoid for an unattended subprocess in your cwd.
+[providers.claude-sub]
+api_type     = "cli"
+command      = "claude"
+# model      = "claude-opus-4-20250514"           # optional; omit to use CLI default
+extra_args   = ["--allowedTools", "WebSearch", "WebFetch"]
+capabilities = ["web_search"]                     # marks it real-time-eligible
+
+# Agent mappings — deliberate diverse spread across model lineages.
+# Built-in defaults are used for any agent not listed here.
+[agents.academic]
+provider = "claude-sub"    # subscription — free; strong long-form analytical synthesis
+
+[agents.practitioner]
+# uses built-in chatgpt default if OPENAI_API_KEY is set
+
 [agents.real-time]
-provider = "deepseek"                       # ERROR unless deepseek has capabilities=["web_search"]
+provider = "claude-sub"    # free web search via subscription
+                            # note: perplexity sonar-deep-research is still stronger
+                            # for live research; this is the $0 alternative
 
-# Define a brand-new agent type:
-[agents.legal-primary]
-provider      = "glm"
-system_prompt = "You are a legal research analyst. Cite controlling authority, not commentary."
-strategy = "Statutes, case law, regulatory dockets, agency guidance. Cite the controlling authority."
+[agents.grey-literature]
+provider = "deepseek"
+
+[agents.contrarian]
+provider = "kimi"
+
+# ---------------------------------------------------------------------------
+# EXAMPLE B: minimal cli-only setup (subscription, no API keys needed)
+# ---------------------------------------------------------------------------
+
+# [providers.claude-sub]
+# api_type = "cli"
+# command  = "claude"
+# extra_args = ["--allowedTools", "WebSearch", "WebFetch"]
+# capabilities = ["web_search"]
+
+# [agents.academic]
+# provider = "claude-sub"
+
+# [agents.real-time]
+# provider = "claude-sub"
+
+# ---------------------------------------------------------------------------
+# Custom agent type example
+# ---------------------------------------------------------------------------
+
+# [agents.legal-primary]
+# provider      = "glm"
+# system_prompt = "You are a legal research analyst. Cite controlling authority, not commentary."
+# strategy      = "Statutes, case law, regulatory dockets, agency guidance. Cite the controlling authority."

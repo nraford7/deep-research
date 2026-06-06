@@ -8,6 +8,7 @@ definitions to materialise runtime instances.
 
 import os
 import random
+import shutil
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,7 +17,7 @@ from pathlib import Path
 @dataclass(frozen=True)
 class Provider:
     name: str
-    api_type: str                       # "openai" | "anthropic" | "gemini"
+    api_type: str                       # "openai" | "anthropic" | "gemini" | "cli"
     api_key: str
     model: str
     base_url: str | None = None
@@ -25,6 +26,8 @@ class Provider:
     pricing: dict | None = None         # {"in","out", optional "reasoning","searches_per_run","search_per_k"}
     fallback_models: tuple[str, ...] = ()
     max_concurrency: int | None = None
+    command: str | None = None          # CLI binary name/path for cli providers
+    extra_args: tuple[str, ...] = ()   # opt-in extra CLI flags (e.g. to enable web search)
 
 
 @dataclass(frozen=True)
@@ -277,6 +280,20 @@ def load_env_files(paths=(Path.home() / ".env", Path(".env")), env=None):
     return env
 
 def _provider_from_table(name, t, env):
+    if t.get("api_type") == "cli":
+        if "command" not in t:
+            raise ConfigError(f"provider '{name}' with api_type='cli' missing required field: command")
+        if shutil.which(t["command"]) is None:
+            return None  # binary not installed — skip gracefully
+        return Provider(
+            name=name, api_type="cli", api_key="", model=t.get("model", ""),
+            base_url=t.get("base_url"), max_tokens=t.get("max_tokens", 32768),
+            capabilities=tuple(t.get("capabilities", ())), pricing=t.get("pricing"),
+            fallback_models=tuple(t.get("fallback_models", ())),
+            max_concurrency=t.get("max_concurrency"),
+            command=t["command"],
+            extra_args=tuple(t.get("extra_args", ())),
+        )
     missing = {"api_type", "model"} - t.keys()
     if missing:
         raise ConfigError(f"provider '{name}' missing required field(s): {', '.join(sorted(missing))}")
