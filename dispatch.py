@@ -17,8 +17,6 @@ Usage:
 
 import argparse
 import json
-import os
-import subprocess
 import sys
 import threading
 import time
@@ -26,6 +24,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import config as cfg
+import llm
 
 # Make sibling scripts/ importable when run as a CLI
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -94,132 +93,14 @@ def build_prompt(topic, scope, strategy, languages=None, domain_priorities=None)
 """
 
 
-# --- Generic api_type callers ---
-
-def call_openai(client, provider, agent_type, prompt, output_path):
-    resp = client.chat.completions.create(
-        model=provider.model,
-        max_tokens=provider.max_tokens,
-        messages=[{"role": "system", "content": agent_type.system_prompt},
-                  {"role": "user", "content": prompt}],
-    )
-    if not resp.choices or not resp.choices[0].message.content:
-        raise RuntimeError(f"provider '{provider.name}' returned an empty response")
-    text = resp.choices[0].message.content
-    output_path.write_text(text, encoding="utf-8")
-    return text
-
-
-def call_anthropic(client, provider, agent_type, prompt, output_path):
-    msg = client.messages.create(
-        model=provider.model,
-        max_tokens=provider.max_tokens,
-        system=agent_type.system_prompt,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    if not msg.content or not getattr(msg.content[0], "text", None):
-        raise RuntimeError(f"provider '{provider.name}' returned an empty response")
-    text = msg.content[0].text
-    output_path.write_text(text, encoding="utf-8")
-    return text
-
-
-def _is_gemini_overload(exc):
-    for attr in ("status_code", "code"):
-        c = getattr(exc, attr, None)
-        if isinstance(c, int) and c in (429, 500, 503):
-            return True
-    return type(exc).__name__ in ("ServerError", "ResourceExhausted", "UnavailableError")
-
-
-def call_gemini(client, provider, agent_type, prompt, output_path):
-    from google.genai import types as genai_types
-    full = f"{agent_type.system_prompt}\n\n{prompt}"
-    last = None
-    for model_id in [provider.model, *provider.fallback_models]:
-        try:
-            resp = client.models.generate_content(
-                model=model_id, contents=full,
-                config=genai_types.GenerateContentConfig(max_output_tokens=provider.max_tokens),
-            )
-            text = resp.text
-            if not text:
-                raise RuntimeError(f"provider '{provider.name}' returned an empty response")
-            output_path.write_text(text, encoding="utf-8")
-            return text
-        except Exception as e:
-            if not _is_gemini_overload(e):
-                raise
-            last = e
-    raise RuntimeError(f"All Gemini models failed for provider '{provider.name}': {last}")
-
-CLI_TIMEOUT_S = 1800  # reports are long; generous timeout
-
-
-def _cli_argv_and_input(provider, agent_type, prompt):
-    base = os.path.basename(provider.command)
-    if base == "claude":
-        argv = [provider.command, "-p", "--system-prompt", agent_type.system_prompt]
-        if provider.model:
-            argv += ["--model", provider.model]
-        argv += list(provider.extra_args)
-        return argv, prompt                      # user prompt via stdin
-    if base == "codex":
-        argv = [provider.command, "exec"]
-        if provider.model:
-            argv += ["--model", provider.model]
-        argv += list(provider.extra_args)
-        return argv, f"{agent_type.system_prompt}\n\n{prompt}"  # system prepended (no dedicated flag)
-    # generic: pass everything via stdin
-    argv = [provider.command] + list(provider.extra_args)
-    return argv, f"{agent_type.system_prompt}\n\n{prompt}"
-
-
-def call_cli(client, provider, agent_type, prompt, output_path):
-    argv, stdin_text = _cli_argv_and_input(provider, agent_type, prompt)
-    env = dict(os.environ)
-    env.pop("ANTHROPIC_API_KEY", None)   # force subscription auth, not metered API
-    env.pop("OPENAI_API_KEY", None)
-    proc = subprocess.run(argv, input=stdin_text, capture_output=True, text=True,
-                          env=env, timeout=CLI_TIMEOUT_S)
-    if proc.returncode != 0:
-        raise RuntimeError(f"provider '{provider.name}' CLI exited {proc.returncode}: "
-                           f"{proc.stderr.strip()[:500]}")
-    text = proc.stdout.strip()
-    if not text:
-        raise RuntimeError(f"provider '{provider.name}' returned an empty response")
-    output_path.write_text(text, encoding="utf-8")
-    return text
-
-
-DISPATCH = {"openai": call_openai, "anthropic": call_anthropic, "gemini": call_gemini, "cli": call_cli}
-
-
 def agent_filename(agent_type_name):
     return f"agent-{agent_type_name}.md"
 
 
-def make_client(provider):
-    if provider.api_type == "cli":
-        return None                                # no SDK client; subprocess handles auth
-    if provider.api_type == "anthropic":
-        import anthropic
-        return anthropic.Anthropic(api_key=provider.api_key)
-    if provider.api_type == "gemini":
-        from google import genai
-        return genai.Client(api_key=provider.api_key)
-    from openai import OpenAI                      # openai-compatible (incl. perplexity/grok/deepseek/glm)
-    kwargs = {"api_key": provider.api_key}
-    if provider.base_url:
-        kwargs["base_url"] = provider.base_url
-    return OpenAI(**kwargs)
-
-
 def run_agent(provider, agent_type, prompt, output_path):
-    client = make_client(provider)
-    caller = DISPATCH[provider.api_type]
     start = time.time()
-    text = caller(client, provider, agent_type, prompt, output_path)
+    text = llm.call_model(provider, agent_type.system_prompt, prompt)
+    output_path.write_text(text, encoding="utf-8")
     return {"agent_type": agent_type.name, "provider": provider.name, "model": provider.model,
             "status": "ok", "words": len(text.split()), "seconds": round(time.time() - start, 1),
             "file": str(output_path)}
@@ -366,11 +247,6 @@ def load_scope_brief(scope_file):
     return path.read_text(encoding="utf-8")
 
 
-def _existing_toml_paths():
-    candidates = [Path.home() / ".config" / "deep-research" / "config.toml", Path("deep-research.toml")]
-    return [p for p in candidates if p.exists()]
-
-
 def main():
     parser = argparse.ArgumentParser(description="Deep Research Dispatcher — multi-model parallel research",
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -393,7 +269,7 @@ def main():
     domain_priorities = load_scope_brief(args.scope_file)
 
     env = cfg.load_env_files()
-    providers, agents = cfg.load_config(_existing_toml_paths(), env)
+    providers, agents = cfg.load_config(cfg.default_toml_paths(), env)
 
     if args.agents != "all":
         wanted = [a.strip() for a in args.agents.split(",") if a.strip()]

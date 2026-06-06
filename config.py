@@ -263,6 +263,12 @@ def resolve_assignments(agents, providers, seed=0, prior_assignments=None):
     return assignments, warnings
 
 
+def default_toml_paths():
+    """Return the list of existing TOML config paths in standard locations."""
+    candidates = [Path.home() / ".config" / "deep-research" / "config.toml", Path("deep-research.toml")]
+    return [p for p in candidates if p.exists()]
+
+
 def load_env_files(paths=(Path.home() / ".env", Path(".env")), env=None):
     """Merge KEY=VAL lines from .env files into a dict (mirrors old dispatch.py loader)."""
     env = dict(os.environ if env is None else env)
@@ -324,6 +330,31 @@ def _builtin_provider(name, env):
         capabilities=tuple(spec.get("capabilities", ())), pricing=spec.get("pricing"),
         fallback_models=tuple(spec.get("fallback_models", ())),
     )
+
+def load_defaults(toml_paths):
+    """Read the [defaults] table (provider roles like utility/synthesis) from the TOML
+    paths; later paths override earlier. Returns {} if no [defaults] anywhere."""
+    out = {}
+    for path in toml_paths:
+        data = tomllib.loads(Path(path).read_text(encoding="utf-8"))
+        out.update(data.get("defaults") or {})
+    return out
+
+
+def pick_provider(providers, role, defaults, fallback=("claude-sub", "claude", "chatgpt")):
+    """Resolve a provider for a one-off role (e.g. 'utility'): the [defaults][role]
+    provider if configured, else the first available provider in `fallback`, else any
+    available provider, else None."""
+    if not providers:
+        return None
+    name = defaults.get(role)
+    if name and name in providers:
+        return providers[name]
+    for fb in fallback:
+        if fb in providers:
+            return providers[fb]
+    return next(iter(providers.values()), None)
+
 
 def load_config(toml_paths, env):
     providers = {n: p for n in BUILTIN_PROVIDER_SPECS if (p := _builtin_provider(n, env))}

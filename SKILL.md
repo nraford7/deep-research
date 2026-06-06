@@ -44,6 +44,18 @@ TOML config **augments** `~/.env` — built-in providers still activate automati
 
 **Inline API keys are supported in TOML** — see `config.toml.example` at the repo root. Copy it to `./deep-research.toml` or `~/.config/deep-research/config.toml` and fill in your keys. Both paths are gitignored.
 
+**`[defaults]` table** — names providers for one-off, non-strategy calls. Currently used by Round 0 scoping (`scope.py --use-llm`):
+
+```toml
+[defaults]
+utility = "claude-sub"     # provider for one-off calls (scoping)
+# synthesis = "claude-sub" # reserved for future reasoning/synthesis rounds
+```
+
+Resolution order (`config.pick_provider`): `[defaults].<role>` provider if configured → first available of `claude-sub`, `claude`, `chatgpt` → any configured provider → fall back to rule-based. Prefer a cheap or subscription provider here; a web-search provider (e.g. Perplexity) would spend its per-search budget on a trivial JSON call.
+
+**`config.py` is the single control point** for provider resolution in the shipped pipeline scripts: both Round 1 dispatch (`dispatch.py`, via `load_config` + the agent-type assignment) and Round 0 scoping (`scope.py`, via `pick_provider` on the `[defaults].utility` role) load their providers through it. The `[defaults]` role-resolution above is used for the one-off `scope.py` call, not by `dispatch.py` (which maps agent types to providers). Note: Rounds 2–4 reasoning runs on the Claude Code session's own subagents and is outside these scripts.
+
 > **Model-ID drift warning:** Provider model IDs change. For example, DeepSeek legacy IDs `deepseek-reasoner` and `deepseek-chat` retire 2026-07-24 in favour of `deepseek-v4-*`; GLM model IDs also shift. Always verify the current ID in the provider's docs. `max_tokens` must stay within each model's output cap — exceeding it causes a 400 error.
 
 ### CLI / subscription providers (`api_type = "cli"`)
@@ -147,8 +159,10 @@ python3 scripts/scope.py \
   --topic "Your topic" \
   --scope "Your scope" \
   --output research/[topic-slug]/round0/scope.md \
-  --use-llm   # optional — refines with Claude
+  --use-llm   # optional — refines with the configured utility provider
 ```
+
+`--use-llm` resolves the provider via `config.py`: it reads `[defaults].utility` from your TOML, falls back to the first available of `claude-sub`, `claude`, `chatgpt`, then any configured provider, and falls back silently to rule-based scoping if none are available or the call fails. Previously this was hardcoded to the Anthropic API; it now runs through whichever provider you configure — including a `cli`/subscription provider at $0 per call.
 
 The output is injected into every Round 1 agent prompt via `--scope-file`, so each agent knows which sources to weight. **This is the single largest credibility upgrade in the pipeline** — a generic prompt produces generic sources.
 

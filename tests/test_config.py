@@ -235,3 +235,55 @@ def test_cli_provider_extra_args_parsed(tmp_path):
     p.write_text('[providers.sub]\napi_type="cli"\ncommand="sh"\nextra_args=["--allowedTools","WebSearch"]\n')
     providers, _ = config.load_config(toml_paths=[p], env={})
     assert providers["sub"].extra_args == ("--allowedTools", "WebSearch")
+
+
+def test_load_defaults_reads_table(tmp_path):
+    p = tmp_path / "c.toml"
+    p.write_text('[defaults]\nutility = "kimi"\nsynthesis = "claude-sub"\n')
+    d = config.load_defaults([p])
+    assert d == {"utility": "kimi", "synthesis": "claude-sub"}
+
+def test_load_defaults_missing_is_empty(tmp_path):
+    p = tmp_path / "c.toml"
+    p.write_text('[providers.x]\napi_type="openai"\napi_key="k"\nmodel="m"\n')
+    assert config.load_defaults([p]) == {}
+
+def test_load_defaults_later_path_overrides(tmp_path):
+    g = tmp_path / "g.toml"; pr = tmp_path / "p.toml"
+    g.write_text('[defaults]\nutility = "a"\n')
+    pr.write_text('[defaults]\nutility = "b"\n')
+    assert config.load_defaults([g, pr])["utility"] == "b"
+
+def _p(name, **kw):
+    kw.setdefault("api_type", "openai"); kw.setdefault("api_key", "k"); kw.setdefault("model", "m")
+    return config.Provider(name=name, **kw)
+
+def test_pick_provider_uses_default_when_available():
+    providers = {"kimi": _p("kimi"), "claude": _p("claude")}
+    got = config.pick_provider(providers, "utility", {"utility": "kimi"})
+    assert got is not None and got.name == "kimi"
+
+def test_pick_provider_falls_back_when_default_absent():
+    # default names a provider that isn't configured -> fall through to fallback order
+    providers = {"claude": _p("claude"), "chatgpt": _p("chatgpt")}
+    got = config.pick_provider(providers, "utility", {"utility": "ghost"},
+                               fallback=("claude-sub", "claude", "chatgpt"))
+    assert got.name == "claude"
+
+def test_pick_provider_any_when_no_default_no_fallback_match():
+    providers = {"weird": _p("weird")}
+    got = config.pick_provider(providers, "utility", {}, fallback=("claude", "chatgpt"))
+    assert got.name == "weird"     # last resort: any available provider
+
+def test_pick_provider_none_when_no_providers():
+    assert config.pick_provider({}, "utility", {"utility": "kimi"}) is None
+
+def test_default_toml_paths_returns_only_existing(tmp_path, monkeypatch):
+    # project-local present, global absent
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "deep-research.toml").write_text('[defaults]\nutility="x"\n')
+    monkeypatch.setattr(config.Path, "home", staticmethod(lambda: tmp_path / "nohome"))
+    paths = config.default_toml_paths()
+    # default_toml_paths returns relative Path("deep-research.toml") for the local candidate
+    assert any(p.resolve() == (tmp_path / "deep-research.toml").resolve() for p in paths)
+    assert all(p.exists() for p in paths)

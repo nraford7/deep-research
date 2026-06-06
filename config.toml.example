@@ -54,6 +54,14 @@ command      = "claude"
 extra_args   = ["--allowedTools", "WebSearch", "WebFetch"]
 capabilities = ["web_search"]                     # marks it real-time-eligible
 
+# One-off calls (Round 0 scoping, future synthesis) — pick a cheap/subscription
+# provider. Avoid a web-search provider like Perplexity here: its per-search cost
+# is wasted on the trivial JSON call scope.py makes.
+[defaults]
+utility = "claude-sub"     # provider for one-off calls (scoping). Falls back to
+                           # claude-sub → claude → chatgpt → any available provider.
+# synthesis = "claude-sub" # reserved for future reasoning/synthesis rounds
+
 # Agent mappings — deliberate diverse spread across model lineages.
 # Built-in defaults are used for any agent not listed here.
 [agents.academic]
