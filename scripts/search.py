@@ -32,10 +32,34 @@ def _ensure_path() -> None:
         sys.path.insert(0, str(REPO_ROOT))
 
 
+class _QuietParser(argparse.ArgumentParser):
+    """argparse that does NOT print its own multi-line usage/error text.
+
+    On a bad invocation, stock argparse writes `usage: ...` + `error: ...` to
+    stderr before exiting. The wrapper's contract is a single one-line notice, so
+    we suppress argparse's output and let run() emit the notice. error() still
+    exits non-zero (like argparse) so run()'s SystemExit handler fires; exit()
+    (used by --help after print_help) is preserved with its status."""
+
+    def error(self, message):  # noqa: D401
+        raise SystemExit(2)
+
+    def exit(self, status=0, message=None):
+        raise SystemExit(status)
+
+
 def _load_engine():
-    """Import the vendored engine. Raises ImportError if deps/engine missing."""
+    """Import the vendored engine and probe its optional runtime dep.
+
+    The engine imports `sqlite_vec` lazily (deep inside cmd_index/cmd_query), so a
+    plain module import succeeds even when the optional search deps are NOT
+    installed — the failure would otherwise surface later as a cryptic engine
+    SystemExit. Probing `sqlite_vec` up front makes a missing optional dep raise
+    ImportError here, so the caller gives the actionable
+    'pip install -r requirements-search.txt' guidance instead."""
     _ensure_path()
     from vendor.semantic_search import search as engine
+    import sqlite_vec  # noqa: F401  — optional dep; engine imports it lazily, probe early
     return engine
 
 
@@ -114,12 +138,12 @@ def run(argv) -> int:
     argv = list(argv)
     try:
         if argv and argv[0] == "index":
-            ip = argparse.ArgumentParser(prog="scripts/search.py index")
+            ip = _QuietParser(prog="scripts/search.py index")
             ip.add_argument("--root", default=None, help="research root (default ./research)")
             a = ip.parse_args(argv[1:])
             return _do_index(_research_root(a.root))
 
-        qp = argparse.ArgumentParser(
+        qp = _QuietParser(
             prog="scripts/search.py",
             description="Semantic search over your deep-research output.",
         )

@@ -93,6 +93,25 @@ def test_import_failure_names_requirements_file_exit0(monkeypatch, tmp_path, cap
     assert "requirements-search.txt" in capsys.readouterr().err
 
 
+def test_load_engine_probes_missing_optional_dep(monkeypatch):
+    """The REAL _load_engine must raise ImportError when sqlite_vec is absent —
+    the engine imports it lazily, so without the probe a missing dep would slip
+    past the ImportError branch and surface as a cryptic late SystemExit. This
+    proves the requirements-search.txt guidance path is actually reachable in
+    production, not just when ImportError is hand-mocked."""
+    import builtins
+    real_import = builtins.__import__
+
+    def fake_import(name, *a, **k):
+        if name == "sqlite_vec":
+            raise ImportError("No module named 'sqlite_vec'")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    with pytest.raises(ImportError):
+        w._load_engine()
+
+
 def test_index_runtime_error_skips_exit0(monkeypatch, tmp_path, capsys):
     monkeypatch.chdir(tmp_path)
     eng = types.SimpleNamespace()
@@ -103,12 +122,16 @@ def test_index_runtime_error_skips_exit0(monkeypatch, tmp_path, capsys):
     assert "indexing failed" in capsys.readouterr().err
 
 
-def test_bad_args_exit0(monkeypatch, tmp_path, capsys):
-    """argparse errors (unknown flag / bad type) must NOT propagate nonzero."""
+def test_bad_args_exit0_one_line_notice(monkeypatch, tmp_path, capsys):
+    """argparse errors (unknown flag) must NOT propagate nonzero AND must emit
+    only the wrapper's one-line notice — no argparse 'usage:' / 'error:' noise."""
     monkeypatch.chdir(tmp_path)
     assert w.run(["index", "--bogus"]) == 0
     assert w.run(["--bogus", "q"]) == 0
-    assert "invalid arguments" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "invalid arguments" in err
+    assert "usage:" not in err  # _QuietParser suppresses argparse's own output
+    assert "error:" not in err
 
 
 def test_missing_index_gives_guidance_exit0(monkeypatch, tmp_path, capsys):
