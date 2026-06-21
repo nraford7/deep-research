@@ -51,6 +51,10 @@ pip install -r ~/.claude/skills/deep-research/requirements.txt
 # 3. Set whichever API keys you have
 cp ~/.claude/skills/deep-research/.env.example ~/.env
 # edit ~/.env and fill in keys
+
+# 4. (Optional) Enable bundled semantic search over your research
+pip install -r ~/.claude/skills/deep-research/requirements-search.txt
+# needs OPENAI_API_KEY; without this step search just skips gracefully
 ```
 
 The skill auto-detects which keys are set. Missing keys = that model skipped, no failure. **One key works. Three or more is the sweet spot. Five is maximum.**
