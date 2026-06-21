@@ -147,7 +147,10 @@ Round 4  MECHANICAL VERIFICATION (Crossref/OpenAlex resolver) + adversarial fact
               ↓
 Round 5  (optional) ITERATIVE DEEPENING — rerun weak sections, cap 2 iterations
               ↓
+EXPORT   BibTeX + claims.jsonl + refresh project-wide semantic index
+              ↓
 OUTPUT   Hub-and-spoke Research Bible + BibTeX + claims.jsonl
+         + project-wide semantic index spanning every topic
 ```
 
 ## Round 0: Domain Scoping (NEW)
@@ -554,22 +557,24 @@ Then re-integrate the new content into the section file, re-run Round 4 on just 
 The output is NOT a single monolithic file. It's a **hub-and-spoke structure** plus a machine-readable export:
 
 ```
-research/[topic-slug]/
-├── README.md                          ← THE HUB
-├── sections/
-│   ├── 01-[section-name].md
-│   ├── 02-[section-name].md
-│   ├── ...
-│   └── bibliography.md
-├── export/
-│   ├── bibliography.bib               ← BibTeX for downstream use
-│   └── claims.jsonl                   ← One row per inline citation w/ context
-├── round4/
-│   ├── citation-verification.md
-│   ├── tier-report.md
-│   ├── missing-lit.md
-│   └── fix-log.md
-└── round0..round5/                    ← Provenance preserved
+research/
+├── .semantic-index.db                    ← PROJECT-WIDE semantic index (all topics; git-ignored)
+└── [topic-slug]/
+    ├── README.md                          ← THE HUB
+    ├── sections/
+    │   ├── 01-[section-name].md
+    │   ├── 02-[section-name].md
+    │   ├── ...
+    │   └── bibliography.md
+    ├── export/
+    │   ├── bibliography.bib               ← BibTeX for downstream use
+    │   └── claims.jsonl                   ← One row per inline citation w/ context
+    ├── round4/
+    │   ├── citation-verification.md
+    │   ├── tier-report.md
+    │   ├── missing-lit.md
+    │   └── fix-log.md
+    └── round0..round5/                    ← Provenance preserved
 ```
 
 ### Generate the export
@@ -580,6 +585,80 @@ python3 scripts/export.py \
     --bibliography research/[slug]/sections/bibliography.md \
     --output-dir research/[slug]/export/
 ```
+
+### Index for semantic search
+
+After export, refresh a single **project-wide** semantic index so the entire
+research library — every topic run in this project's `research/` folder — is
+searchable by meaning with one `/semantic-search` query. This reuses the
+incremental indexer from the `semantic-search` skill; deep-research only wires it
+in as a final step.
+
+```bash
+python3 -B ~/.claude/skills/semantic-search/search.py --index \
+  --cwd "$(pwd)/research" \
+  --in '*/README.md' \
+  --in '*/sections/*.md'
+```
+
+- **`--cwd .../research`** — index root is the `research/` folder, so the db lands
+  at `research/.semantic-index.db` by default. One db, every topic in the project.
+- **`--in '*/README.md' --in '*/sections/*.md'`** — indexes only the final Bible
+  (each topic's hub + section files; `bibliography.md` lives in `sections/`, so it
+  is covered). Raw `round*/` artifacts and `export/` files are never indexed.
+- **`--index` is incremental** — sha1-per-file change detection re-embeds only
+  what changed; the disk embedding cache makes even that near-free.
+- **Orphan deletion is scope-limited to the `--in` globs** — so re-indexing on
+  every run cannot disturb anything outside the Bible files. This is what makes
+  auto-reindex-on-every-run safe.
+
+> **Cost note:** embedding runs outside the pipeline's `--max-cost-usd` gate, by
+> design — it is immaterial. `text-embedding-3-small` is $0.02 / 1M tokens, so a
+> full first index of a large multi-topic corpus is ~$0.01–0.05; incremental
+> re-indexes are near-zero and warm-cache rebuilds are free. Against a $5–150
+> research run this is noise. (If you ever want to skip it on a given run, omit
+> this step — the Bible is complete without it.)
+
+Print the indexer's summary line (`Indexed N new + M changed + R removed,
+skipped K unchanged`) to the user.
+
+**Querying this index.** The db lives at `research/.semantic-index.db`, so a
+search must use the same root — `/semantic-search` run from the project root
+defaults to `./.semantic-index.db` and would miss it. Point the query at the
+`research/` root explicitly:
+
+```bash
+python3 -B ~/.claude/skills/semantic-search/search.py \
+  --cwd "$(pwd)/research" "your query here"
+```
+
+(Equivalently, `cd research` first, then query.) Tell the user this is how to
+search the research corpus.
+
+**Behavior across multiple runs.** The point of one db at the `research/` root is
+that subsequent runs extend the same index:
+
+- **New related / sub-topic (new slug)** — its files are new, get embedded, and
+  join the index; prior topics are skipped (unchanged sha1). Search now spans
+  both. Additive and cheap.
+- **True iteration (same slug, overwritten)** — changed sections are re-embedded
+  and their old chunks replaced; vanished section files are orphan-deleted within
+  the Bible globs. The index reflects the latest synthesis.
+- **Versioned iterations (`[slug]-v2/`)** — every version is indexed, so history
+  stays searchable (provenance) at the cost of surfacing stale passages.
+
+**Recommended convention:** overwrite the same slug when refining one topic; use a
+new slug for a genuinely different sub-topic; reserve version folders for when
+stale copies should stay searchable.
+
+`.semantic-index.db` is disposable — the embedding cache and incremental rebuild
+reconstruct it cheaply. Git-ignore it: add `research/.semantic-index.db` to
+`.gitignore`.
+
+Requires the `semantic-search` skill installed at
+`~/.claude/skills/semantic-search/` and `OPENAI_API_KEY` available (env or
+`~/.env`). If either is missing, skip this step with a one-line notice — the
+Research Bible is complete without it.
 
 ### The Hub: README.md
 
@@ -654,7 +733,8 @@ When `/deep-research [topic]` is invoked:
 19. **Round 4.5** — apply fixes; reassemble final document
 20. **(Optional) Round 5** — iterative deepening on sections graded C or lower
 21. **Export** — `scripts/export.py` for BibTeX + claims.jsonl
-22. **Report** — present summary to user with file location, stats, grade
+22. **Index** — refresh the project-wide semantic index over all topics' Bibles (skip with notice if semantic-search/OpenAI key absent)
+23. **Report** — present summary to user with file location, stats, grade, and index summary line
 
 ## Scaling Guidance
 
