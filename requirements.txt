@@ -11,3 +11,5 @@ requests>=2.31.0
 
 # Optional: faster fuzzy match for bibliography dedup
 rapidfuzz>=3.6.0
+
+# Optional: semantic search over your research — see requirements-search.txt

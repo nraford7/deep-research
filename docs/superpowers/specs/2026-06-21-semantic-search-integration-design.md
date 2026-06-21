@@ -11,7 +11,7 @@ supersedes: external-companion-skill approach (the prior shell-out-to-~/.claude 
 
 Make deep-research a **single self-contained repo**: clone it, `pip install -r
 requirements.txt`, and you have full multi-model research. The semantic-search
-**code ships in the repo too** — no separate skill to install — and activates
+**code is bundled in the repo too** — no separate skill to install — and activates
 once you add its optional deps (`pip install -r requirements-search.txt`) and an
 `OPENAI_API_KEY`. Until then it skips gracefully without affecting anything. With
 it on, the final step of every run refreshes one project-wide index over every

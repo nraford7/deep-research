@@ -19,7 +19,9 @@ Round 3  Three section planners + reconciler → parallel integration agents
 Round 4  Mechanical citation verification (Crossref/OpenAlex) + source tier audit
          + missing-literature check + adversarial fact-check + fix pass
 Round 5  (optional) Iterative deepening on weak sections, cap 2 iterations
+Index    Refresh a project-wide semantic index over every topic's Bible (bundled)
 Output   Hub-and-spoke Research Bible + BibTeX + claims.jsonl + provenance
+         + searchable semantic index spanning every topic in the project
 ```
 
 ## What's new vs. a one-shot LLM
@@ -35,6 +37,7 @@ Output   Hub-and-spoke Research Bible + BibTeX + claims.jsonl + provenance
 - **Multi-language search** — `--languages en,fr,de,zh` finds non-English primary sources
 - **Cost gate + resume** — pre-flight estimate, `--max-cost-usd` hard cap, `--resume` recovers from partial failure
 - **BibTeX + JSONL export** — machine-readable downstream consumption
+- **Bundled semantic search** — the engine is bundled in this repo (`vendor/semantic_search/`); after each run, one project-wide index over every topic's Bible makes the whole research library searchable by meaning. Opt-in deps (`pip install -r requirements-search.txt`); skips gracefully (exit 0 + notice) if deps or `OPENAI_API_KEY` are absent — never breaks a run.
 
 ## Install
 
@@ -102,7 +105,31 @@ python3 scripts/export.py \
   --sections research/cbdc/sections/ \
   --bibliography research/cbdc/sections/bibliography.md \
   --output-dir research/cbdc/export/
+
+# 7. Refresh the project-wide semantic index (bundled; over every topic's Bible)
+python3 scripts/search.py index
 ```
+
+### Searching what you've researched
+
+Semantic search is **bundled** — no separate install. Add the optional deps once:
+
+```bash
+pip install -r requirements-search.txt   # sqlite-vec + apsw; openai is already in base
+```
+
+Then search the whole research library by meaning (the wrapper targets
+`research/.semantic-index.db` for you):
+
+```bash
+python3 scripts/search.py "central bank digital currency risks"
+python3 scripts/search.py "CBDC risks" --topic cbdc    # scope to one topic
+```
+
+Re-running `/deep-research` on the same topic updates that topic's entries in
+place; a new sub-topic just joins the index. Both are incremental — only changed
+sections re-embed. If the deps or `OPENAI_API_KEY` are missing, indexing/search
+print a one-line notice and exit 0 — core research is unaffected.
 
 ## API keys
 
@@ -141,26 +168,29 @@ Providers can also be local CLI tools (`api_type = "cli"`) — for example `clau
 | `scripts/classify_sources.py` | Tier classifier (peer-reviewed / institutional / book / news / blog / wiki) + quality score |
 | `scripts/lit_search.py` | Query OpenAlex + Semantic Scholar; optionally compare against finished bibliography to flag missing canonical works |
 | `scripts/export.py` | Emit BibTeX (`bibliography.bib`) + JSONL (`claims.jsonl`) from final Bible |
+| `scripts/search.py` | Bundled semantic search: `index` builds the project-wide index over all Bibles; a positional query searches it (`--topic` scopes to one topic). Skips gracefully without deps/key. |
 
 ## Output
 
 ```
-research/<topic-slug>/
-├── README.md                  ← The hub: index, exec summary, key findings
-├── sections/
-│   ├── 01-<name>.md           ← Integrated topic sections (each 8k–20k words)
-│   ├── 02-<name>.md
-│   └── bibliography.md        ← Deduplicated master bibliography
-├── export/
-│   ├── bibliography.bib       ← BibTeX
-│   └── claims.jsonl           ← Inline citations with surrounding sentence
-├── round4/
-│   ├── citation-verification.md  ← Mechanical OpenAlex/Crossref resolution
-│   ├── tier-report.md            ← Source quality breakdown
-│   ├── missing-lit.md            ← Canonical works absent
-│   ├── factcheck-*.md            ← Adversarial fact-check reports
-│   └── fix-log.md
-└── round0..round5/            ← Provenance preserved
+research/
+├── .semantic-index.db             ← Project-wide semantic index (all topics; git-ignored)
+└── <topic-slug>/
+    ├── README.md                  ← The hub: index, exec summary, key findings
+    ├── sections/
+    │   ├── 01-<name>.md           ← Integrated topic sections (each 8k–20k words)
+    │   ├── 02-<name>.md
+    │   └── bibliography.md        ← Deduplicated master bibliography
+    ├── export/
+    │   ├── bibliography.bib       ← BibTeX
+    │   └── claims.jsonl           ← Inline citations with surrounding sentence
+    ├── round4/
+    │   ├── citation-verification.md  ← Mechanical OpenAlex/Crossref resolution
+    │   ├── tier-report.md            ← Source quality breakdown
+    │   ├── missing-lit.md            ← Canonical works absent
+    │   ├── factcheck-*.md            ← Adversarial fact-check reports
+    │   └── fix-log.md
+    └── round0..round5/            ← Provenance preserved
 ```
 
 ## Why five strategies, not one
