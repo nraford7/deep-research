@@ -87,7 +87,7 @@ def query_openalex(topic: str, limit: int = 50):
                 "id": w.get("id"),
                 "authors": [a.get("author", {}).get("display_name") for a in (w.get("authorships") or [])[:5]],
                 "type": w.get("type"),
-                "venue": (w.get("host_venue") or {}).get("display_name") or (w.get("primary_location") or {}).get("source", {}).get("display_name"),
+                "venue": (w.get("host_venue") or {}).get("display_name") or ((w.get("primary_location") or {}).get("source") or {}).get("display_name"),
                 "source": "openalex",
             })
         if len(results) >= limit:

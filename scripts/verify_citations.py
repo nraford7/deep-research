@@ -59,7 +59,8 @@ INLINE_CITE_RE = re.compile(
 )
 URL_RE = re.compile(r"https?://[^\s\)\]\>]+")
 DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+", re.IGNORECASE)
-BIB_HEADER_RE = re.compile(r"^#{1,3}\s*(bibliography|references|sources)\b", re.IGNORECASE | re.MULTILINE)
+BIB_HEADER_RE = re.compile(r"^(#{1,6})\s+.*\b(bibliography|references|works cited|sources)\b",
+                           re.IGNORECASE | re.MULTILINE)
 
 
 def first_surname(author_field: str) -> str:
@@ -120,16 +121,22 @@ def extract_bibliography(text: str):
     m = BIB_HEADER_RE.search(text)
     if not m:
         return []
+    level = len(m.group(1))
     tail = text[m.end():]
-    next_h = re.search(r"^#{1,3}\s+\S", tail, re.MULTILINE)
-    if next_h:
-        tail = tail[:next_h.start()]
+    # Stop only at the next heading of the same or higher level, so deeper category
+    # subheadings (e.g. "### A. Formal narratology") stay inside the bibliography.
+    for hm in re.finditer(r"^(#{1,6})\s+\S", tail, re.MULTILINE):
+        if len(hm.group(1)) <= level:
+            tail = tail[:hm.start()]
+            break
+    # Drop inner heading lines (category subheadings) before splitting into entries.
+    tail = "\n".join(ln for ln in tail.splitlines() if not re.match(r"^\s*#{1,6}\s", ln))
     entries = []
     for raw in re.split(r"\n(?=\s*[-*]\s|\s*\d+\.\s)", tail):
         raw = raw.strip(" -*\t\n")
         if len(raw) < 20:
             continue
-        entries.append(raw)
+        entries.append(re.sub(r"\s+", " ", raw))
     return entries
 
 

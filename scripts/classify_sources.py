@@ -30,6 +30,18 @@ PEER_REVIEWED_HINTS = [
     r"\bLancet\b", r"\bNEJM\b", r"\bIEEE\b", r"\bACM\b", r"\bSpringer\b",
     r"\bElsevier\b", r"\bWiley\b", r"\bMIT Press\b", r"\bCambridge\b",
     r"\bOxford\b", r"\bRoutledge\b", r"\bAcademy of\b",
+    # Generic venue cues
+    r"\bConference on\b", r"\bWorkshop on\b", r"\bSymposium\b", r"\bTransactions\b",
+    # NLP / ML / HCI venues (and the ACL Anthology)
+    r"\bEMNLP\b", r"\bNAACL\b", r"\bEACL\b", r"\bTACL\b", r"\bCOLING\b", r"\bLREC\b",
+    r"\bSIGDIAL\b", r"\bComputational Linguistics\b", r"aclanthology\.org",
+    r"\bACL\b", r"\bNeurIPS\b", r"\bNIPS\b", r"\bICLR\b", r"\bICML\b", r"\bAAAI\b",
+    r"\bIJCAI\b", r"\bCHI\b", r"\bCOLM\b", r"\bCSCW\b",
+    # Journals appearing in narrative / computational-humanities work
+    r"\bPNAS\b", r"Proceedings of the National Academy", r"\bScience Advances\b",
+    r"\bEPJ Data Science\b", r"Humanities and Social Sciences Communications",
+    r"\bCognitive Science\b", r"\bDiscourse Processes\b",
+    r"Journal of Cultural Analytics", r"\bPLOS\b", r"\bJAIR\b", r"\bScientific Reports\b",
 ]
 INSTITUTIONAL_HINTS = [
     r"\bIMF\b", r"\bWorld Bank\b", r"\bUNCTAD\b", r"\bOECD\b", r"\bUNDP\b",
@@ -41,7 +53,12 @@ INSTITUTIONAL_HINTS = [
     r"\btechnical report\b", r"\bwhite paper\b",
 ]
 BOOK_HINTS = [
-    r"\bISBN\b", r"\bChapter \d+\b", r"\bPress\b\s*$", r"\bUniversity Press\b",
+    r"\bISBN\b", r"\bChapter \d+\b", r"\bUniversity Press\b",
+    r"\bUniversity of [A-Z][A-Za-z]+ Press\b", r"\b[A-Z][a-z]+ University Press\b",
+    r"\bPress\b\s*[.,]?\s*$", r"\bRoutledge\b", r"\bGuilford\b", r"\bNorton\b",
+    r"\bPenguin\b", r"\bVintage\b", r"\bBasic Books\b", r"\bRandom House\b",
+    r"\bHarperCollins\b", r"\bFarrar, Straus\b", r"\bDAW Books\b",
+    r"\bMichael Wiese\b", r"\bChicago Press\b", r"\bHarvard\b", r"\bYale\b", r"\bPrinceton\b",
 ]
 NEWS_HINTS = [
     r"\bNew York Times\b", r"\bWall Street Journal\b", r"\bFinancial Times\b",
@@ -57,11 +74,16 @@ BLOG_HINTS = [
 WIKI_HINTS = [
     r"wikipedia\.org", r"\bWikipedia\b", r"fandom\.com", r"wikimedia\.org",
 ]
+PREPRINT_HINTS = [
+    r"\barXiv\b", r"arxiv\.org", r"\bpreprint\b", r"\bbioRxiv\b", r"\bmedRxiv\b",
+    r"\bOpenReview\b", r"openreview\.net",
+]
 
 PATTERNS = [
     ("peer_reviewed", PEER_REVIEWED_HINTS),
     ("institutional", INSTITUTIONAL_HINTS),
     ("book", BOOK_HINTS),
+    ("preprint", PREPRINT_HINTS),
     ("news", NEWS_HINTS),
     ("blog", BLOG_HINTS),
     ("wiki", WIKI_HINTS),
@@ -127,22 +149,23 @@ def main():
         "| Tier | Count | % |",
         "|---|---|---|",
     ]
-    for tier in ["peer_reviewed", "institutional", "book", "news", "blog", "wiki", "unknown"]:
+    for tier in ["peer_reviewed", "institutional", "preprint", "book", "news", "blog", "wiki", "unknown"]:
         n = counts.get(tier, 0)
         lines.append(f"| {tier} | {n} | {100*n/total:.1f}% |")
 
     quality_score = (
         counts.get("peer_reviewed", 0) * 3
         + counts.get("institutional", 0) * 3
+        + counts.get("preprint", 0) * 2
         + counts.get("book", 0) * 2
         + counts.get("news", 0) * 1
     ) / (total * 3)
     lines += ["", f"## Quality score: **{quality_score:.2f}** / 1.0",
               "",
-              "(weighted: peer_reviewed=3, institutional=3, book=2, news=1, blog/wiki/unknown=0)",
+              "(weighted: peer_reviewed=3, institutional=3, preprint=2, book=2, news=1, blog/wiki/unknown=0)",
               ""]
 
-    for tier in ["unknown", "wiki", "blog", "news", "book", "institutional", "peer_reviewed"]:
+    for tier in ["unknown", "wiki", "blog", "news", "book", "preprint", "institutional", "peer_reviewed"]:
         members = [e for e, t in classified if t == tier]
         if not members:
             continue

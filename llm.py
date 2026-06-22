@@ -28,10 +28,15 @@ def make_client(provider):
 
 
 def _complete_openai(client, provider, system_prompt, user_prompt):
+    # GPT-5+ rejects `max_tokens`, requiring `max_completion_tokens`. Other
+    # OpenAI-compatible endpoints (perplexity, grok, gpt-4.x) still use max_tokens.
+    m = (provider.model or "").lower()
+    token_kw = "max_completion_tokens" if m.startswith(("gpt-5", "o1", "o3", "o4")) else "max_tokens"
     resp = client.chat.completions.create(
-        model=provider.model, max_tokens=provider.max_tokens,
+        model=provider.model,
         messages=[{"role": "system", "content": system_prompt},
                   {"role": "user", "content": user_prompt}],
+        **{token_kw: provider.max_tokens},
     )
     if not resp.choices or not resp.choices[0].message.content:
         raise RuntimeError(f"provider '{provider.name}' returned an empty response")
@@ -39,13 +44,19 @@ def _complete_openai(client, provider, system_prompt, user_prompt):
 
 
 def _complete_anthropic(client, provider, system_prompt, user_prompt):
-    msg = client.messages.create(
+    # Stream: the SDK refuses non-streaming requests that may exceed 10 min,
+    # which large max_tokens (e.g. 128k) reliably trips for long reports.
+    parts = []
+    with client.messages.stream(
         model=provider.model, max_tokens=provider.max_tokens,
         system=system_prompt, messages=[{"role": "user", "content": user_prompt}],
-    )
-    if not msg.content or not getattr(msg.content[0], "text", None):
+    ) as stream:
+        for chunk in stream.text_stream:
+            parts.append(chunk)
+    text = "".join(parts)
+    if not text.strip():
         raise RuntimeError(f"provider '{provider.name}' returned an empty response")
-    return msg.content[0].text
+    return text
 
 
 def _is_gemini_overload(exc):

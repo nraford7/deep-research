@@ -30,7 +30,10 @@ except ImportError:
 
 DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+", re.IGNORECASE)
 URL_DOI_RE = re.compile(r"https?://(?:dx\.)?doi\.org/", re.IGNORECASE)
-BIB_HEADER_RE = re.compile(r"^#{1,3}\s*(bibliography|references|sources)\b", re.IGNORECASE | re.MULTILINE)
+# Match a heading whose text CONTAINS bibliography/references/sources anywhere
+# (e.g. "# Master Bibliography", "## Works Cited / References"), not only at the start.
+BIB_HEADER_RE = re.compile(r"^(#{1,6})\s+.*\b(bibliography|references|works cited|sources)\b",
+                           re.IGNORECASE | re.MULTILINE)
 TITLE_NORM_RE = re.compile(r"[^a-z0-9]+")
 STOPWORDS = {"the", "a", "an", "of", "in", "and", "on", "for", "to", "with", "by"}
 
@@ -39,10 +42,17 @@ def extract_bibliography(text: str):
     m = BIB_HEADER_RE.search(text)
     if not m:
         return []
+    level = len(m.group(1))
     tail = text[m.end():]
-    next_h = re.search(r"^#{1,3}\s+\S", tail, re.MULTILINE)
-    if next_h:
-        tail = tail[:next_h.start()]
+    # Stop only at the next heading of the SAME OR HIGHER level (fewer/equal '#'),
+    # so deeper category subheadings (e.g. "### A. Formal narratology") stay INSIDE
+    # the bibliography rather than truncating it at the first subsection.
+    for hm in re.finditer(r"^(#{1,6})\s+\S", tail, re.MULTILINE):
+        if len(hm.group(1)) <= level:
+            tail = tail[:hm.start()]
+            break
+    # Drop inner heading lines (category subheadings) before splitting into entries.
+    tail = "\n".join(ln for ln in tail.splitlines() if not re.match(r"^\s*#{1,6}\s", ln))
     entries = []
     for raw in re.split(r"\n(?=\s*[-*]\s|\s*\d+\.\s)", tail):
         raw = raw.strip(" -*\t\n")

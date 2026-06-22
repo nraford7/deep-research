@@ -219,6 +219,33 @@ python3 tests/test_parsers.py
 python3 -m pytest tests/
 ```
 
+## Recent reliability fixes (2026-06)
+
+Hardening from a large real run (a ~28k-word, 130+-source Research Bible):
+
+- **Long Anthropic reports stream.** `_complete_anthropic` now uses the streaming API, so
+  large-`max_tokens` reports no longer trip the SDK's 10-minute non-streaming guard (which
+  previously killed the academic agent outright).
+- **GPT-5 / o-series support.** `_complete_openai` sends `max_completion_tokens` for
+  `gpt-5*`/`o1`/`o3`/`o4` models (which reject `max_tokens`) and `max_tokens` for everything
+  else (gpt-4.x, Perplexity, Grok). You can now set a GPT-5 model as a provider without a 400.
+- **Bibliography parser is format-tolerant.** `extract_bibliography` (used by
+  `verify_citations.py` and `dedup_bib.py`) now matches any heading that *contains*
+  "bibliography/references/works cited/sources" (e.g. `# Master Bibliography`), keeps deeper
+  `### Category` subheadings inside the bibliography instead of truncating at the first one,
+  and drops inner heading lines before splitting entries. Previously a categorized
+  LLM-generated bibliography parsed as a single entry, falsely orphaning every inline cite.
+- **Richer source-tier heuristics.** `classify_sources.py` recognizes arXiv/preprints (own
+  tier), the major NLP/ML/HCI venues (EMNLP, ACL, NAACL, NeurIPS, ICLR, ICML, AAAI, CHI, COLM,
+  TACL, the ACL Anthology) and journals (PNAS, Science Advances, EPJ Data Science, PLOS, JAIR,
+  Cognitive Science, etc.), plus broader book-publisher patterns ("University of X Press" and
+  common scholarly/trade imprints) — so a scholarly corpus no longer scores as low-tier.
+- **`lit_search.py` null-safety.** Guards a null OpenAlex `primary_location.source` that raised
+  `AttributeError` and aborted the missing-literature check.
+- **Stale default model ID.** The built-in `claude` provider's retired
+  `claude-opus-4-20250514` (now 404) is updated to a current Opus. Model IDs still drift —
+  override per provider in TOML.
+
 ## License
 
 MIT — see `LICENSE`.
