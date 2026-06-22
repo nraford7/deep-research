@@ -105,6 +105,44 @@ def test_classify_tiers():
       classify("Treasury report 2024. https://www.treasury.gov/report.pdf") == "institutional")
 
 
+def test_classify_tiers_scholarly_venues():
+    # NLP/ML/HCI conference papers and major journals should be peer_reviewed.
+    t("EMNLP -> peer_reviewed",
+      classify("Yang, K. (2022). Re3. Findings of EMNLP 2022.") == "peer_reviewed")
+    t("aclanthology -> peer_reviewed",
+      classify("Doe, J. (2023). Title. aclanthology.org/2023.acl-long.1") == "peer_reviewed")
+    t("PNAS -> peer_reviewed",
+      classify("Reinhart, A. (2025). Do LLMs write like humans. PNAS 122(8).") == "peer_reviewed")
+    # Bare arXiv preprints get their own tier, not 'unknown'.
+    t("arXiv -> preprint",
+      classify("Pham, C. (2025). Frankentext. arXiv:2505.18128") == "preprint")
+    # University-press books (incl. "University of X Press") classify as book.
+    t("University of X Press -> book",
+      classify("Propp, V. (1968). Morphology of the Folktale. University of Texas Press.") == "book")
+
+
+def test_bibliography_parser_handles_master_heading_and_subcategories():
+    # Regression: a "# Master Bibliography" heading (keyword not first) with
+    # "### Category" subheadings must parse ALL entries, not stop at the first
+    # subheading and not fail the header match entirely.
+    bib = (
+        "# Master Bibliography\n\n"
+        "Method: deduplicated across reports.\n\n"
+        "### A. Formal narratology\n"
+        "- Genette, G. (1980). Narrative Discourse. Cornell University Press.\n"
+        "- Propp, V. (1968). Morphology of the Folktale. University of Texas Press.\n\n"
+        "### B. Computational\n"
+        "- Russell, J. et al. (2026). StoryScope. arXiv:2604.03136\n"
+        "- Reagan, A. et al. (2016). Emotional arcs. EPJ Data Science 5:31.\n"
+    )
+    entries = extract_bibliography(bib)
+    t("master-bibliography heading parses >= 4 entries", len(entries) >= 4)
+    t("entries span both subcategories",
+      any("Genette" in e for e in entries) and any("StoryScope" in e for e in entries))
+    t("category subheadings are not captured as entries",
+      not any(e.strip().lower().startswith("b. computational") for e in entries))
+
+
 # --- DEDUP ---
 
 def test_dedup_does_not_overmerge_distinct_papers():
@@ -190,6 +228,8 @@ if __name__ == "__main__":
     test_export_parse_bib_skips_prose()
     test_classify_parse_bib_skips_prose()
     test_classify_tiers()
+    test_classify_tiers_scholarly_venues()
+    test_bibliography_parser_handles_master_heading_and_subcategories()
     test_dedup_does_not_overmerge_distinct_papers()
     test_dedup_merges_same_doi()
     test_dedup_year_mismatch_blocks_merge()

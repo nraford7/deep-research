@@ -137,8 +137,10 @@ DEFAULT_PAIRING: dict[str, str] = {
 BUILTIN_PROVIDER_SPECS: dict[str, dict] = {
     "claude": {
         "api_type": "anthropic",
+        # The previous default `claude-opus-4-20250514` was retired and now 404s.
+        # Pinned to a current Opus; override in TOML as model IDs drift.
+        "model": "claude-opus-4-8",
         "env_key": "ANTHROPIC_API_KEY",
-        "model": "claude-opus-4-20250514",
         "max_tokens": 128000,
         "capabilities": [],
         "pricing": {"in": 15.0, "out": 75.0},
